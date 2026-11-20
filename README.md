@@ -29,7 +29,7 @@ OpenFi 6C（MT7981B）的固件树。底座是
 |---|---|
 | 设备树 / 板级 | `mt7981b-openfi-6c.dts`、`filogic.mk`、`01_leds`、`02_network` |
 | 内核 | `mtk_hnat` 四个文件（`hnat.c` / `hnat.h` / `hnat_debugfs.c` / `hnat_nf_hook.c`）的修复 |
-| 自研包 | `package/openfi/`：风扇控制 `luci-app-openfi-fan` + 公共库 `openfi-lib` |
+| 自研包 | 独立仓库 [`openfi-packages`](https://github.com/676791huang/openfi-packages)：风扇 `luci-app-openfi-fan` + 公共库 `openfi-lib`，以 feed 拉取 |
 | 出场调优 | SQM/CAKE（`files/etc/config/sqm`）、关掉 turboacc 的 HNAT 快路、`sysctl` 网络调优、5G 模组默认项 |
 | 脚本 | `scripts/openfi/`：一致性检查、LED 检查、musl 检查、同步到树 |
 | CI | `build.yml`（五层缓存出固件）、`sync-upstream.yml`（镜像 + 合并 + 两道闸门） |

@@ -26,7 +26,7 @@ name: build
 #   ④ 的 key 里带【内核指纹】（files-6.12 / patches-6.12 / kernel config）：
 #   改驱动时内核必须真的重编，不能拿旧内核凑数。内核指纹变了 → 这层缓存
 #   精确匹配不上、restore-keys 也刻意不跨内核回退 → 这一轮做干净构建。
-#   改我们自己的包（package/openfi/**）不会动 key，那一层缓存照样命中，
+#   改我们自己的包（openfi-packages 仓库，作为 feed 拉取）不会动 key，那一层缓存照样命中，
 #   只有被改的包会重编。
 #
 # ── key 怎么选（踩过坑，别乱改）──────────────────────────────────────────
@@ -49,7 +49,7 @@ name: build
 #   · Artifact：sysupgrade 固件 + md5 + 编译日志（保留 30 / 7 天）
 #   · workflow_dispatch 且 publish=true 时，额外建一个 Release
 #
-# 我们的三个 LuCI 包在 package/openfi/ 下（树内编译，不走 feed），defconfig
+# 我们的 LuCI 包在独立仓库 676791huang/openfi-packages，构建时以 feed 拉取，defconfig
 # 里已经选中；改包直接跟着固件提交，不需要等 feed 推送。
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -70,7 +70,6 @@ on:
       - 'defconfig/**'
       - 'feeds.conf.default'
       # 我们自己的包和检查脚本
-      - 'package/openfi/**'
       - 'scripts/openfi/**'
       # 设备支持
       - 'target/linux/mediatek/dts/mt7981b-openfi-6c.dts'
@@ -193,35 +192,6 @@ jobs:
           chk target/linux/mediatek/image/filogic.mk
           chk feeds.conf.default
 
-          # 用 musl 编一遍我们的源码：glibc 会把 <sys/select.h> 这类头间接带进来，
-          # musl 不会 —— 同一份代码本地编得过、目标机上就是硬错误。
-          # 装不上就跳过（不阻塞），有超时，别卡在 apt 上。
-          if command -v apt-get >/dev/null 2>&1 && ! command -v musl-gcc >/dev/null 2>&1; then
-            timeout 90 sudo apt-get install -y -qq musl-tools >/dev/null 2>&1 \
-              || timeout 120 sh -c 'sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools' >/dev/null 2>&1 \
-              || echo "::warning::musl-tools 装不上,跳过目标环境编译检查"
-          fi
-          if grep -vE '^[[:space:]]*#' scripts/openfi/check-musl.sh \
-               | grep -q 'dirname "\$0")/\.\.'; then
-            echo "::error::check-musl.sh 又用了按固定层级回退的 cd —— 从别的目录调用会失败"
-            fail=1
-          fi
-          if ! timeout 240 sh scripts/openfi/check-musl.sh; then
-            echo "::warning::musl 编译检查没跑完(超时或有问题) —— 看上面的输出"
-          fi
-
-          # 5G 面板已交给 feed 里的 luci-app-5gmodem（完整版），我们自己的
-          # 模组/短信包和 usbmode 脚本已删；这里只防呆，防止它们又被加回来。
-          for p in luci-app-openfi-fan openfi-lib; do
-            [ -d "package/openfi/$p" ] || { echo "::error::缺少 package/openfi/$p"; fail=1; }
-          done
-          for p in luci-app-openfi-modem luci-app-openfi-sms; do
-            [ -d "package/openfi/$p" ] && { echo "::error::package/openfi/$p 应已删除"; fail=1; }
-          done
-
-          # 跨包一致性：JS 的 uci 引用 / ACL / uci-defaults 配置文件必须指向同一个配置
-          [ -x scripts/openfi/check-consistency.sh ] && { sh scripts/openfi/check-consistency.sh || fail=1; }
-
           # apk 换源脚本：真跑一遍（造个假源列表），并检查幂等
           if [ -f files/etc/uci-defaults/95-openfi-apk-mirror ]; then
             T=$(mktemp -d)
@@ -261,22 +231,12 @@ jobs:
               || { echo "::error::filogic.mk 里缺少: $k"; fail=1; }
           done
 
-          echo "----- 树内包能被扫到吗 -----"
-          # Makefile 里不能用 C 风格注释，否则 make 解析失败、扫描器静默跳过，
-          # 最后报的是"依赖不存在"，很难查。
-          for p in openfi-lib luci-app-openfi-fan; do
-            f="package/openfi/$p/Makefile"
-            [ -e "$f" ] || { echo "::error::缺少 $f"; fail=1; continue; }
-            grep -qE '^[[:space:]]*/\*|^[[:space:]]*\*/' "$f" \
-              && { echo "::error::$f 里有 C 风格注释，make 解析会失败"; fail=1; }
-            grep -q 'call BuildPackage' "$f" \
-              || { echo "::error::$f 里没有 call BuildPackage，扫描器看不见它"; fail=1; }
-          done
 
           echo "----- LED 名字核对（改错不报错，只是灯不亮）-----"
           python3 scripts/openfi/check-leds.py \
             || { echo "::error::LED 名字对不上，编出来灯不会亮"; fail=1; }
 
+          [ "$fail" -eq 0 ] || exit 1
           [ "$fail" -eq 0 ] || exit 1
           echo "✅ 板级接线自检通过"
 
@@ -326,7 +286,36 @@ jobs:
           timeout 600 ./scripts/feeds install -a \
             || { echo "::error::feeds 安装超时"; exit 1; }
           echo "包版本(当前提交): $(git rev-parse --short HEAD 2>/dev/null || echo '?')"
-          ls package/openfi/ 2>/dev/null || true
+          ls package/feeds/openfi/ 2>/dev/null || true
+
+      # ── feed 包自检（feeds 装完才能查）────────────────────────────────
+      - name: 自检（feed 里的 openfi 包）
+        run: |
+          set -eu
+          fail=0
+          for p in luci-app-openfi-fan openfi-lib; do
+            d="package/feeds/openfi/$p"
+            [ -d "$d" ] || { echo "::error::feed 里没有 $p —— 检查 feeds.conf.default 的 openfi 源"; fail=1; continue; }
+            f="$d/Makefile"
+            grep -qE '^[[:space:]]*/\*|^[[:space:]]*\*/' "$f" \
+              && { echo "::error::$f 里有 C 风格注释，make 解析会失败"; fail=1; }
+            grep -q 'call BuildPackage' "$f" \
+              || { echo "::error::$f 里没有 call BuildPackage，扫描器看不见它"; fail=1; }
+          done
+
+          # musl 下重编一遍源码：glibc 会把 <sys/select.h> 间接带进来，musl 不会
+          if ! command -v musl-gcc >/dev/null 2>&1; then
+            timeout 90 sudo apt-get install -y -qq musl-tools >/dev/null 2>&1 \
+              || timeout 120 sh -c 'sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools' >/dev/null 2>&1 \
+              || echo "::warning::musl-tools 装不上,跳过目标环境编译检查"
+          fi
+          timeout 240 sh scripts/openfi/check-musl.sh || echo "::warning::musl 编译检查没跑完(超时或有问题)"
+
+          # 跨包一致性：menu.d / acl.d / uci-defaults 要指向同一个包名
+          [ -x scripts/openfi/check-consistency.sh ] && { sh scripts/openfi/check-consistency.sh || fail=1; }
+
+          [ "$fail" -eq 0 ] || exit 1
+          echo "✅ feed 包自检通过"
 
       # ── ③ 工具链 + 宿主工具 ───────────────────────────────────────────
       - name: ③ 恢复工具链 + 宿主工具（省 ~40 分钟）

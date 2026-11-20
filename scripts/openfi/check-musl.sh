@@ -44,6 +44,7 @@ _d="$_sd"
 P=.
 while [ "$_d" != "/" ]; do
 	if [ -d "$_d/openfi-lib/src" ]; then P="$_d"; break; fi
+	if [ -d "$_d/package/feeds/openfi/openfi-lib/src" ]; then P="$_d/package/feeds/openfi"; break; fi
 	if [ -d "$_d/package/openfi/openfi-lib/src" ]; then P="$_d/package/openfi"; break; fi
 	_d=$(dirname "$_d")
 done

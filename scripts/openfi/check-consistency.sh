@@ -4,9 +4,11 @@
 #   · 已经删掉的旧模组/短信包不能再被引用
 set -u
 fail=0
-FAN=package/openfi/luci-app-openfi-fan
-
-[ -d "$FAN" ] || { echo "缺少 $FAN"; exit 1; }
+FAN=""
+for cand in package/feeds/openfi/luci-app-openfi-fan package/openfi/luci-app-openfi-fan; do
+	[ -d "$cand" ] && { FAN="$cand"; break; }
+done
+[ -n "$FAN" ] || { echo "缺少 luci-app-openfi-fan（feeds 没装？先 ./scripts/feeds update -a && ./scripts/feeds install -a）"; exit 1; }
 
 menu=$(find "$FAN/root/usr/share/luci/menu.d" -name '*.json' 2>/dev/null | head -1)
 acl=$(find "$FAN/root/usr/share/rpcd/acl.d" -name '*.json' 2>/dev/null | head -1)
@@ -20,7 +22,8 @@ ls "$FAN/root/etc/uci-defaults/" >/dev/null 2>&1 \
 done
 
 # 已删除的旧实现不能再出现在树里
-for d in package/openfi/luci-app-openfi-modem package/openfi/luci-app-openfi-sms \
+for d in package/feeds/openfi/luci-app-openfi-modem package/feeds/openfi/luci-app-openfi-sms \
+         package/openfi/luci-app-openfi-modem package/openfi/luci-app-openfi-sms \
          files/usr/sbin/openfi-usbmode files/etc/init.d/openfi-usbmode; do
 	[ -e "$d" ] && { echo "::error::应已删除: $d"; fail=1; }
 done

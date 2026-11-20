@@ -69,8 +69,8 @@ src-git 5gmodem https://github.com/fildunsky/luci-app-5gmodem.git;v4.0.9
 |---|---|
 | `target/linux/mediatek/dts/mt7981b-openfi-6c.dts` | 设备树（LED / 按键 / GPIO 引出） |
 | `defconfig/openfi6c.config` | 本设备的构建配置 |
-| `package/openfi/luci-app-openfi-fan/` | 风扇控制（C 程序 + LuCI 页面 + 物理开关 + uci-defaults） |
-| `package/openfi/openfi-lib/` | 三个包共用的公共库 |
+| `openfi-packages` 仓库的 `luci-app-openfi-fan/` | 风扇控制（C 程序 + LuCI 页面 + 物理开关 + uci-defaults）；以 feed 拉取，不再放在本树 |
+| `openfi-packages` 仓库的 `openfi-lib/` | 公共库；以 feed 拉取 |
 | `scripts/openfi/` | 一致性检查、LED 检查、musl 检查、同步到树 |
 | `files/etc/config/sqm`、`files/etc/config/turboacc` | 出场网络调优（CAKE 整形、关掉 turboacc 的 HNAT 快路） |
 | `files/etc/sysctl.d/99-openfi-net-tweaks.conf` | 延迟 / 缓冲区调优 |
