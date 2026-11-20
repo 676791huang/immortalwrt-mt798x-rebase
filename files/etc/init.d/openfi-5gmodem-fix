@@ -1,49 +1,44 @@
 #!/bin/sh /etc/rc.common
-# 5gmodem 的接口取名修复。
-#
-# 背景：luci-app-5gmodem 生成 interface 时，把 /dev/cdc-wdm0 这种绝对路径
-# 直接写进 uci 的 device；netifd 的 mbim/qmi 协议要的是设备名（cdc-wdm0），
-# 于是出现 NO_DEVICE、接口起不来。
-#
-# 这里做三件事（都幂等）：
-#   1. 修正 mkiface.sh，让它以后生成的 device 不带 /dev/ 前缀；
-#   2. 把已经写坏的 network.*.device 归一化；
-#   3. 确保 5G 接口在防火墙的 wan 区里。
-
+# 5G 配置小修（幂等，不做任何"删接口"的动作）。
+#  1. mkiface.sh 生成 device 时去掉 /dev/ 前缀（netifd 只认设备名）；
+#  2. 已写坏的 network.*.device 归一化；
+#  3. 防火墙 wan 区去重（保留原样，不增不减）。
 START=15
 
 fix_mkiface() {
-	f=/usr/share/5gmodem/mkiface.sh
+	local f=/usr/share/5gmodem/mkiface.sh
 	[ -f "$f" ] || return 0
 	grep -q 'IDEV="\$DEV"' "$f" || return 0
 	sed -i 's|IDEV="\$DEV"|IDEV="${DEV#/dev/}"|' "$f"
-	logger -t openfi-5gmodem-fix "mkiface.sh: device 改为设备名（去掉 /dev/）"
+	logger -t openfi-net-fix "mkiface.sh: device 改用设备名"
 }
 
 fix_device_paths() {
-	local secs s d
+	local s d secs
 	secs=$(uci -q show network 2>/dev/null \
 		| sed -n "s/^network\.\([^.]*\)\.device='\/dev\/.*'$/\1/p")
+	[ -n "$secs" ] || return 0
 	for s in $secs; do
-		d=$(uci -q get "network.$s.device")
-		d=${d#/dev/}
+		d=$(uci -q get "network.$s.device"); d=${d#/dev/}
 		uci -q set "network.$s.device=$d"
-		logger -t openfi-5gmodem-fix "network.$s.device -> $d"
 	done
-	[ -n "$secs" ] && uci -q commit network
+	uci -q commit network
 }
 
 fix_firewall() {
-	local z s devs
+	local z cur new n
 	z=$(uci -q show firewall 2>/dev/null \
 		| sed -n "s/^firewall\.\([^.]*\)\.name='wan'$/\1/p" | head -1)
 	[ -n "$z" ] || return 0
-	devs=$(uci -q show network 2>/dev/null \
-		| sed -n "s/^network\.\([^.]*\)\.device='\(usb[0-9]*\|cdc-wdm[0-9]*\|wwan[0-9]*\)'$/\1/p")
-	for s in $devs; do
-		uci -q get "firewall.$z.network" | tr ' ' '\n' | grep -qx "$s" \
-			|| uci -q add_list "firewall.$z.network=$s"
+	cur=$(uci -q get "firewall.$z.network")
+	new=""
+	for n in $cur; do
+		case " $new " in *" $n "*) continue ;; esac
+		new="$new $n"
 	done
+	new=$(echo $new)
+	[ "$new" = "$cur" ] && return 0
+	uci -q set "firewall.$z.network=$new"
 	uci -q commit firewall
 }
 

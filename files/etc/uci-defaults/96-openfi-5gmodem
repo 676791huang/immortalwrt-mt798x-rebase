@@ -1,17 +1,48 @@
 #!/bin/sh
-# 5gmodem 完整版接管 5G 面板。
-# 灯的接法已经在 board.d/01_leds 里定好了(wwan0 的 netdev 触发)，
-# 这里把 5gmodem 自己的灯控关掉，避免两套东西同时写同一批 LED。
+# 5gmodem 面板配置 + 双模式 WAN。
+#
+# 模组可能是 NCM（usb0）或 MBIM（cdc-wdm0）。两种接口都预先建好，
+# 哪个设备存在哪个就起来（另一个报 NO_DEVICE，无害）。
+# 这样切换模式不需要改任何配置，也不需要检测脚本。
+
 [ -x /usr/share/5gmodem/modemswitch.sh ] || exit 0
 
 uci -q get 5gmodem.@5gmodem[0] >/dev/null || uci -q set 5gmodem.@5gmodem[0]=5gmodem
 uci -q set 5gmodem.@5gmodem[0].signal_leds='0'
 uci -q set 5gmodem.@5gmodem[0].auto_port='1'
 uci -q commit 5gmodem 2>/dev/null
-exit 0
 
-# 让接口取名修复在每次启动都执行（mkiface.sh 的 /dev/ 前缀问题），
-# 首次开机先跑一遍，避免已经生成的接口带着错误路径。
+# NCM：板级 02_network 已生成 wan(usb0/dhcp)，这里只兜底 + 设优先级
+uci -q get network.wan >/dev/null || {
+	uci -q set network.wan=interface
+	uci -q set network.wan.proto='dhcp'
+	uci -q set network.wan.device='usb0'
+}
+uci -q set network.wan.metric='120'
+
+# MBIM：模组切到 MBIM 时自动顶上来
+uci -q get network.wwan >/dev/null || {
+	uci -q set network.wwan=interface
+	uci -q set network.wwan.proto='mbim'
+	uci -q set network.wwan.device='cdc-wdm0'
+}
+uci -q set network.wwan.apn='cmnet'
+uci -q set network.wwan.pdptype='ipv4v6'
+uci -q set network.wwan.metric='110'
+uci -q commit network
+
+# 防火墙 wan 区：存在的 WAN 接口都放进去（幂等，不删任何项）
+z=$(uci -q show firewall 2>/dev/null | sed -n "s/^firewall\.\([^.]*\)\.name='wan'$/\1/p" | head -1)
+if [ -n "$z" ]; then
+	for n in wan wwan wan6; do
+		uci -q get "network.$n" >/dev/null 2>&1 || continue
+		uci -q get "firewall.$z.network" | tr ' ' '\n' | grep -qx "$n" \
+			|| uci -q add_list "firewall.$z.network=$n"
+	done
+	uci -q commit firewall
+fi
+
+# 阻止 mkiface.sh 把 /dev/ 前缀写进 uci
 [ -x /etc/init.d/openfi-5gmodem-fix ] && {
 	/etc/init.d/openfi-5gmodem-fix enable
 	/etc/init.d/openfi-5gmodem-fix boot
