@@ -411,11 +411,13 @@ jobs:
         if: steps.cache.outputs.ran == '1'
         run: |
           set -euo pipefail
-          find build_dir/host toolchain -type f -name '.*' -exec touch {} + 2>/dev/null || true
+          # make world 开始时还会重写一次 .config，普通 touch 会被它反超；
+          # 所以打到未来时间，确保工具链/内核的 stamp 永远比源码和 .config 新。
+          find build_dir/host toolchain -type f -name '.*' -exec touch -d '+1 day' {} + 2>/dev/null || true
           for d in build_dir/target-*/linux-*; do
-            [ -d "$d" ] && find "$d" -maxdepth 1 -type f -name '.*' -exec touch {} + 2>/dev/null || true
+            [ -d "$d" ] && find "$d" -maxdepth 1 -type f -name '.*' -exec touch -d '+1 day' {} + 2>/dev/null || true
           done
-          echo "已刷新 host 工具 / 工具链 / 内核的 stamp"
+          echo "已把 host 工具 / 工具链 / 内核的 stamp 打到未来（避免被 .config 重写反超）"
 
       - name: 编译前诊断
         run: |
