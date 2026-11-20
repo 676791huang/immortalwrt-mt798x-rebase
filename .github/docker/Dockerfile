@@ -20,3 +20,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && for t in gcc g++ make python3 unzip rsync dtc ccache musl-gcc rclone; do \
          command -v "$t" >/dev/null || { echo "缺 $t"; exit 1; }; done \
     && gcc --version | head -1 && ccache --version | head -1 && rclone version | head -1
+
+# GitHub CLI（build.yml 里创建 Release 用；容器里没有 gh 会 exit 127）
+RUN mkdir -p -m 755 /etc/apt/keyrings \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+         -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+         > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gh jq \
+    && rm -rf /var/lib/apt/lists/* \
+    && gh --version | head -1 && jq --version
