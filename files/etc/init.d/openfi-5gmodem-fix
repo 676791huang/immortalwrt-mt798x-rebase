@@ -58,15 +58,15 @@ fix_leds() {
 				&& logger -t openfi-net-fix "LED $(basename "$l") -> $dev"
 		done
 	fi
-	# WLAN 灯：绑到 ra0（2.4G AP）
-	if [ -e /sys/class/net/ra0 ] && [ -d /sys/class/leds/green:wlan ]; then
+	# WLAN 灯：绑到 rax0（5G AP）
+	if [ -e /sys/class/net/rax0 ] && [ -d /sys/class/leds/green:wlan ]; then
 		cur=$(cat /sys/class/leds/green:wlan/device_name 2>/dev/null)
-		if [ "$cur" != "ra0" ]; then
+		if [ "$cur" != "rax0" ]; then
 			echo none > /sys/class/leds/green:wlan/trigger 2>/dev/null
 			echo netdev > /sys/class/leds/green:wlan/trigger 2>/dev/null
-			echo ra0 > /sys/class/leds/green:wlan/device_name 2>/dev/null
+			echo rax0 > /sys/class/leds/green:wlan/device_name 2>/dev/null
 			# netdev 默认 link+tx+rx 都亮，不需要额外写 trigger
-			logger -t openfi-net-fix "LED green:wlan -> ra0"
+			logger -t openfi-net-fix "LED green:wlan -> rax0"
 		fi
 	fi
 }
