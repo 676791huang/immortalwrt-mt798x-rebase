@@ -278,6 +278,16 @@ jobs:
           echo "miss=${miss}" >> "$GITHUB_OUTPUT"
           echo "整代缓存: ${base} 未命中:${miss}"
 
+      - name: 恢复 dl/（旧缓存兜底，仅迁移期）
+        if: env.R2_KEY_ID != '' && contains(steps.cache.outputs.miss, 'dl') && (github.event_name != 'workflow_dispatch' || github.event.inputs.clean_build != 'true')
+        uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: dl
+          key: ofc25-dl-${{ hashFiles('feeds.conf.default') }}-${{ steps.fp.outputs.week }}
+          restore-keys: |
+            ofc25-dl-
+
       - name: 更新并安装 feeds
         run: |
           set -eu
@@ -370,11 +380,30 @@ jobs:
           echo "OK: openfi-lib（被 DEPENDS 自动带进来）"
 
       # ── 下载 + 编译 ───────────────────────────────────────────────────
+      - name: 诊断 l1parser 下载（V=s）
+        continue-on-error: true
+        run: |
+          echo "== 单独跑 l1parser 下载，看真实报错 =="
+          make package/mtk/applications/l1parser/download V=s 2>&1 | tail -40
+
       - name: 下载源码包
         run: |
-          # dl 缓存命中时这一步主要是校验已有文件，很快；缺的才会下载。
+          set -uo pipefail
+          # 并行 make download 失败也会返回 0，所以下载完必须自己检查
           timeout 1800 make download -j"$(nproc)" \
-            || { echo "并行下载超时,改成串行再试一次"; timeout 1800 make download -j1 V=s; }
+            || { echo "并行下载超时,改成串行再试一次"; timeout 1800 make download -j1 V=s || true; }
+          echo "--- 关键源码完整性 ---"
+          miss=0
+          # l1parser 是 git 源，文件名固定为 l1parser-<日期>-<sha>.tar.zst
+          if ls dl/l1parser-* >/dev/null 2>&1; then
+            echo "OK   dl/l1parser-*"
+          else
+            echo "::error::dl/ 里没有 l1parser 源码（git 源下载失败）"
+            miss=1
+          fi
+          # 其余只提示，不阻断
+          ls dl/mt79xx_* >/dev/null 2>&1 || echo "::warning::dl/ 里没看到 mt79xx_* 固件包"
+          [ "$miss" -eq 0 ] || { echo "::error::源码没下全，先修下载再继续"; exit 1; }
 
       - name: 编译前诊断
         run: |

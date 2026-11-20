@@ -77,6 +77,12 @@ echo "  ② 剩下的程序:编译 + 链接"
 
 build_one() {
 	pkg="$1"; bin="$2"; shift 2
+	# 依赖 OpenWrt 私有头（libubox/libubus）的源文件在宿主机上没法编，
+	# 这些头只在 OpenWrt 的 staging_dir 里，跳过并明确说明。
+	if grep -qE '#include <(libubox|libubus)' "$pkg"/src/*.c 2>/dev/null; then
+		printf "     ⏭  %-14s 依赖 libubox/libubus，宿主机跳过（OpenWrt 构建时才检查）\n" "$bin"
+		return
+	fi
 	d="$WORK/$pkg"
 	mkdir -p "$d"
 	# 有的包没有自己的头文件(fan 就只有 .c),所以 .c 和 .h 分开拷
