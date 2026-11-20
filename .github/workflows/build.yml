@@ -319,7 +319,7 @@ jobs:
       # ── ④ 内核 + 包编译目录（增量构建的关键）───────────────────────────
       - name: ④ 恢复内核/包编译目录（省 ~30-40 分钟）
         id: c_td
-        if: env.R2_KEY_ID == '' && (github.event_name != 'workflow_dispatch' || github.event.inputs.clean_build != 'true')
+        if: (env.R2_KEY_ID == '' || steps.r2td.outputs.hit != 'true') && (github.event_name != 'workflow_dispatch' || github.event.inputs.clean_build != 'true')
         uses: actions/cache/restore@v4
         with:
           path: build_dir/target-*
@@ -333,6 +333,7 @@ jobs:
 
       # ── ④' R2 版：编译目录（3GB 的那个大头）────────────────────────────
       - name: ④ 恢复内核/包编译目录（R2）
+        id: r2td
         if: env.R2_KEY_ID != '' && (github.event_name != 'workflow_dispatch' || github.event.inputs.clean_build != 'true')
         run: |
           set -euo pipefail
@@ -340,9 +341,11 @@ jobs:
             secret_access_key="$R2_SECRET" endpoint="$R2_ENDPOINT" --non-interactive >/dev/null
           KEY="ofc25/td-${{ runner.arch }}-${{ steps.fp.outputs.toolchain }}-${{ steps.fp.outputs.kernel }}.tar.zst"
           if timeout 600 rclone copyto "r2:${R2_BUCKET}/${KEY}" /tmp/td.tar.zst --transfers 8 2>/dev/null; then
+            echo "hit=true" >> "$GITHUB_OUTPUT"
             echo "R2 命中: ${KEY}（$(du -h /tmp/td.tar.zst | cut -f1)）"
             time tar -I zstd -xf /tmp/td.tar.zst -C .
           else
+            echo "hit=false" >> "$GITHUB_OUTPUT"
             echo "R2 未命中: ${KEY}（第一轮或指纹变了）"
           fi
           rm -f /tmp/td.tar.zst
