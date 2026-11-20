@@ -76,15 +76,22 @@ jobs:
           fi
           echo "changed=true" >> "$GITHUB_OUTPUT"
           echo "range=${OLD:0:10}..${NEW:0:10}" >> "$GITHUB_OUTPUT"
+          echo "new=${NEW}" >> "$GITHUB_OUTPUT"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "dry_run: 跳过 main 快进（下面只试合并）"
+            exit 0
+          fi
           git push origin "${NEW}:refs/heads/${MIRROR_BRANCH}"
 
       - name: main 合进 product
         if: steps.up.outputs.changed == 'true'
         id: merge
+        env:
+          NEW: ${{ steps.up.outputs.new }}
         run: |
           set -uo pipefail
-          git fetch --no-tags origin "${MIRROR_BRANCH}"
-          if git merge --no-ff --no-edit -m "merge main ← 上游 ${UPSTREAM_BRANCH} [skip ci]" "origin/${MIRROR_BRANCH}"; then
+          git fetch --no-tags origin "${MIRROR_BRANCH}" || true
+          if git merge --no-ff --no-edit -m "merge main ← 上游 ${UPSTREAM_BRANCH} [skip ci]" "$NEW"; then
             echo "ok=true" >> "$GITHUB_OUTPUT"
             echo "✅ 干净地合进来了"
           else
