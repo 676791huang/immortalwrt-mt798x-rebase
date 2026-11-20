@@ -4,8 +4,6 @@ FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 \
     FORCE_UNSAFE_CONFIGURE=1
-# 容器里以 root 运行；工作区/缓存里的 git 仓库属于 runner 用户，需放行
-RUN git config --system --add safe.directory '*' 
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
        build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
@@ -17,6 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
        musl-tools sudo xz-utils bzip2 \
        rclone \
     && rm -rf /var/lib/apt/lists/* \
+    && git config --system --add safe.directory '*' \
     && echo "--- 自检 ---" \
     && for t in gcc g++ make python3 unzip rsync dtc ccache musl-gcc rclone; do \
          command -v "$t" >/dev/null || { echo "缺 $t"; exit 1; }; done \
