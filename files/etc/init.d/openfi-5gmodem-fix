@@ -69,6 +69,23 @@ fix_leds() {
 			logger -t openfi-net-fix "LED green:wlan -> rax0"
 		fi
 	fi
+	# 写回 uci system，保证重启也不会被 board.d 默认值覆盖
+	local s
+	s=$(uci -q show system 2>/dev/null | sed -n "s/^system\.\([^.]*\)\.sysfs='green:wan'$/\1/p" | head -1)
+	if [ -n "$s" ] && [ -n "$dev" ]; then
+		uci -q set "system.$s.trigger=netdev"
+		uci -q set "system.$s.dev=$dev"
+		uci -q set "system.$s.mode=link tx rx"
+	fi
+	s=$(uci -q show system 2>/dev/null | sed -n "s/^system\.\([^.]*\)\.sysfs='green:wlan'$/\1/p" | head -1)
+	if [ -n "$s" ]; then
+		uci -q set "system.$s.trigger=netdev"
+		uci -q set "system.$s.dev=rax0"
+		uci -q set "system.$s.mode=link tx rx"
+		uci -q delete "system.$s.default"
+	fi
+	uci -q commit system
+	/etc/init.d/led reload 2>/dev/null
 }
 
 boot() {
