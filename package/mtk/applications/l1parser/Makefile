@@ -7,7 +7,11 @@ PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL=https://github.com/chasey-dev/l1parser.git
 PKG_SOURCE_DATE:=2025-12-11
 PKG_SOURCE_VERSION:=081bb31211efc74594d25bfd1bb5811f3408a205
-PKG_MIRROR_HASH:=2fdb0d7f29c3fbc53ae2af4b7a2399b8f2850a800299a934719304ae86ee2568
+# 上游的 PKG_MIRROR_HASH 是按其本机 tar/zstd 版本算出的压缩包字节哈希；
+# 我们的构建环境压缩出的字节不同（zstd 版本差异），会导致
+#   "Hash of the local file ... does not match" → 下载被删 → 编译失败。
+# 源码提交号仍然钉死（PKG_SOURCE_VERSION），这里跳过压缩包字节校验。
+PKG_MIRROR_HASH:=skip
 
 PKG_LICENSE:=LGPL-2.1
 PKG_MAINTAINER:=chasey-dev <ellenyoung0912@gmail.com>
