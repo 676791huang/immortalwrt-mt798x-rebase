@@ -511,6 +511,34 @@ jobs:
           echo "已上传: ${KEY}"
           rm -f /tmp/td.tar.zst
 
+      # ── R2 保留策略：最多 2 个版本（上上个 + 上一个）──────────────
+      - name: R2 清理：只保留最新 2 个版本
+        if: env.R2_KEY_ID != '' && (success() || failure())
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          rclone config create r2 s3 provider=Cloudflare access_key_id="$R2_KEY_ID" \
+            secret_access_key="$R2_SECRET" endpoint="$R2_ENDPOINT" --non-interactive >/dev/null
+          rclone lsjson "r2:${R2_BUCKET}/ofc25" --files-only > /tmp/r2.json 2>/dev/null || echo '[]' > /tmp/r2.json
+          python3 -c "
+          import json
+          try:
+              files = json.load(open('/tmp/r2.json'))
+          except Exception:
+              files = []
+          files = [f for f in files if f.get('Path')]
+          files.sort(key=lambda f: f.get('ModTime', ''), reverse=True)
+          for f in files[2:]:
+              print(f['Path'])
+          " > /tmp/r2-old.txt
+          if [ -s /tmp/r2-old.txt ]; then
+            while IFS= read -r p; do
+              rclone deletefile "r2:${R2_BUCKET}/ofc25/$p" && echo "删除旧版本: $p"
+            done < /tmp/r2-old.txt
+          else
+            echo "没有超过 2 个的旧版本，跳过清理"
+          fi
+
       - name: ⑤ 保存 ccache
         if: (success() || failure()) && steps.c_cc.outputs.cache-hit != 'true'
         continue-on-error: true
