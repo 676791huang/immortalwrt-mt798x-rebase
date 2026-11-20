@@ -34,3 +34,11 @@ jobs:
           push: true
           tags: |
             ghcr.io/${{ github.repository_owner }}/immortalwrt-build:latest
+
+      - name: 镜像体积
+        run: |
+          set -e
+          IMG="ghcr.io/${{ github.repository_owner }}/immortalwrt-build:latest"
+          docker pull -q "$IMG" >/dev/null
+          docker image inspect --format '{{.Size}}' "$IMG" \
+            | awk '{printf "镜像大小: %.0f MB\n", $1/1048576}' | tee -a "$GITHUB_STEP_SUMMARY"

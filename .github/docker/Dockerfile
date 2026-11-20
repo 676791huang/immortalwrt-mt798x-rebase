@@ -6,7 +6,7 @@ ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 \
     FORCE_UNSAFE_CONFIGURE=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-       build-essential clang flex bison g++ gawk gcc-multilib g++-multilib \
+       build-essential flex bison g++ gawk \
        gettext git libncurses-dev libssl-dev libelf-dev zlib1g-dev \
        python3 python3-dev python3-setuptools python3-pyelftools python3-ply \
        rsync unzip file wget curl ca-certificates subversion swig cmake \
