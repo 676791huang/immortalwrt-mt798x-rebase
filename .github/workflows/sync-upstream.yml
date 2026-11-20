@@ -1,33 +1,24 @@
 name: sync-upstream
 
-# ── 每天把上游 chasey-dev/immortalwrt-mt798x-rebase 的 25.12 合进来 ───────
+# ── 每天把上游 chasey-dev/immortalwrt-mt798x-rebase 的 25.12 合进来 ────────
 #
-# 为什么不用 git merge：本仓库是"无历史快照"（根提交没有父），和上游没有共同
-# 祖先。所以用"补丁法"：
-#   ① .github/upstream-base 记着上次同步到的上游提交；
-#   ② 从上游只取 base 和新 tip 的树（blob 按需懒取，不拉 7 万条历史）；
-#   ③ git diff base tip → 上游这段时间的改动，git apply --3way 打到我们树上：
-#      和我们的改动不重叠 → 自动合；重叠 → 报冲突；
-#   ④ 成功：提交推送 main，再把 main 合进产品分支（同源，普通 merge 即可）；
-#   ⑤ 冲突：一个字节都不推，开/更新 issue，列出冲突文件和上游提交范围。
+# 分支模型（本仓库是上游的 fork）：
+#   main    = 上游镜像，只做快进，内容永远等于上游 25.12
+#   product = 我们的树；main 合进来，冲突在这里解
 #
-# 触发：每天 UTC 20:00（北京 04:00），也可以手动跑（dry_run 只看不合）。
+# 流程：
+#   ① fetch 上游 25.12；
+#   ② main 快进到上游 tip（不是后代就报错停下，防止被 force-push 搞乱）；
+#   ③ 只有上游有新提交时，才把 main merge 进 product；
+#   ④ 冲突：一个字节都不推，开/更新 issue，列出冲突文件和上游提交范围。
 
 on:
   schedule:
-    - cron: '0 20 * * *'
+    - cron: '0 20 * * *'   # UTC 20:00 = 北京 04:00
   workflow_dispatch:
     inputs:
-      upstream_branch:
-        description: '上游分支'
-        required: false
-        default: '25.12'
-      product_branch:
-        description: '产品分支（main 合完再合进它）'
-        required: false
-        default: '5gmodem-full'
       dry_run:
-        description: '只试不打（不提交、不推送）'
+        description: '只试不合（不推送）'
         type: boolean
         default: false
 
@@ -41,190 +32,103 @@ concurrency:
 
 env:
   UPSTREAM_REPO: chasey-dev/immortalwrt-mt798x-rebase
+  UPSTREAM_BRANCH: '25.12'
+  MIRROR_BRANCH: main
+  PRODUCT_BRANCH: product
 
 jobs:
   sync:
-    name: 拉上游 → 应用到 main → 合进产品分支
+    name: 上游 → main（快进）→ product（合并）
     runs-on: ubuntu-latest
     timeout-minutes: 30
-
     steps:
-      - name: 取出 main
+      - name: 取出 product
         uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ env.PRODUCT_BRANCH }}
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 初始化
+      - name: git 身份
         run: |
-          set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          echo "UP_BRANCH=${{ inputs.upstream_branch || '25.12' }}" >> "$GITHUB_ENV"
-          echo "PRODUCT=${{ inputs.product_branch || '5gmodem-full' }}" >> "$GITHUB_ENV"
-          echo "DRY=${{ inputs.dry_run || 'false' }}" >> "$GITHUB_ENV"
 
-      - name: 拉上游（只取树）
-        run: |
-          set -euo pipefail
-          BASE=$(tr -d '[:space:]' < .github/upstream-base)
-          test -n "$BASE" || { echo "::error::.github/upstream-base 是空的"; exit 1; }
-          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null || true
-          git config remote.upstream.promisor true
-          git config remote.upstream.partialclonefilter blob:none
-          fetch_retry() {
-            for i in 1 2 3; do
-              git "$@" && return 0
-              echo "第 $i 次 fetch 失败，5 秒后重试" >&2
-              sleep 5
-            done
-            return 1
-          }
-          # 只取"上次同步的提交"和"当前 tip"这两棵树，不拉上游 7 万条历史。
-          # 拿不到 base（网络/服务端限制）就退回取整条分支（仍然不带 blob）。
-          if ! fetch_retry fetch --no-tags --depth=1 --filter=blob:none upstream "$BASE"; then
-            echo "::warning::按 SHA 取 base 失败，改取完整分支头"
-            fetch_retry fetch --no-tags --filter=blob:none upstream \
-              "+refs/heads/${UP_BRANCH}:refs/remotes/upstream/${UP_BRANCH}" \
-              || { echo "::error::拉取上游失败（网络或权限）"; exit 1; }
-          fi
-          fetch_retry fetch --no-tags --depth=1 --filter=blob:none upstream \
-            "+refs/heads/${UP_BRANCH}:refs/remotes/upstream/${UP_BRANCH}" \
-            || { echo "::error::拉取上游分支失败"; exit 1; }
-          NEW=$(git rev-parse "refs/remotes/upstream/${UP_BRANCH}^{commit}")
-          {
-            echo "BASE=$BASE"
-            echo "NEW=$NEW"
-          } >> "$GITHUB_ENV"
-          echo "上次同步: $BASE"
-          echo "上游最新: $NEW"
-
-      - name: 判断是否有更新
+      - name: 拉上游并快进 main
         id: up
         run: |
-          if [ "$BASE" = "$NEW" ]; then
+          set -euo pipefail
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git" 2>/dev/null || true
+          git fetch --no-tags upstream "${UPSTREAM_BRANCH}"
+          NEW=$(git rev-parse FETCH_HEAD)
+          git fetch --no-tags origin "${MIRROR_BRANCH}"
+          OLD=$(git rev-parse "origin/${MIRROR_BRANCH}")
+          echo "main: ${OLD}"
+          echo "上游: ${NEW}"
+          if [ "$OLD" = "$NEW" ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "上游没有新提交，收工"
-          else
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-            echo "上游有新提交，开始合"
+            exit 0
           fi
+          if ! git merge-base --is-ancestor "$OLD" "$NEW"; then
+            echo "::error::上游 ${UPSTREAM_BRANCH} 不是 main 的后代（可能被 force-push），需要人工处理"
+            exit 1
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "range=${OLD:0:10}..${NEW:0:10}" >> "$GITHUB_OUTPUT"
+          git push origin "${NEW}:refs/heads/${MIRROR_BRANCH}"
 
-      - name: 生成补丁并 3-way 应用
+      - name: main 合进 product
         if: steps.up.outputs.changed == 'true'
-        id: apply
+        id: merge
         run: |
           set -uo pipefail
-          if ! git diff --binary "$BASE" "$NEW" > /tmp/upstream.patch; then
-            echo "::error::生成上游补丁失败"; exit 1
-          fi
-          FILES=$(grep -c '^diff --git' /tmp/upstream.patch || true)
-          echo "补丁 $(wc -c < /tmp/upstream.patch) 字节，涉及 ${FILES:-0} 个文件"
-          if git apply --3way --index /tmp/upstream.patch; then
+          git fetch --no-tags origin "${MIRROR_BRANCH}"
+          if git merge --no-ff --no-edit -m "merge main ← 上游 ${UPSTREAM_BRANCH} [skip ci]" "origin/${MIRROR_BRANCH}"; then
             echo "ok=true" >> "$GITHUB_OUTPUT"
-            echo "✅ 干净地应用了上游改动"
+            echo "✅ 干净地合进来了"
           else
-            echo "ok=false" >> "$GITHUB_OUTPUT"
             git ls-files -u | awk '{print $4}' | sort -u > /tmp/conflicts.txt || true
-            echo "❌ 有冲突：$(wc -l < /tmp/conflicts.txt) 个文件"
-            head -40 /tmp/conflicts.txt || true
-            git reset --hard HEAD >/dev/null 2>&1
-            git clean -fdq
+            git merge --abort || true
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "❌ 冲突 $(wc -l < /tmp/conflicts.txt) 个文件"
           fi
 
       - name: 冲突 → 开 issue 并停下
-        if: steps.up.outputs.changed == 'true' && steps.apply.outputs.ok == 'false'
+        if: steps.up.outputs.changed == 'true' && steps.merge.outputs.ok == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -uo pipefail
-          RANGE="https://github.com/${UPSTREAM_REPO}/compare/${BASE:0:10}...${NEW:0:10}"
+          RANGE="${{ steps.up.outputs.range }}"
           {
-            echo "每天自动同步上游时，**${BASE:0:10}..${NEW:0:10}** 这段和我们的改动冲突了。"
+            echo "自动同步上游时，**${RANGE}** 这段和 product 冲突了。"
             echo
-            echo "- 上游范围：$RANGE"
+            echo "- 上游范围：https://github.com/${UPSTREAM_REPO}/compare/${RANGE}"
             echo "- 冲突文件（最多 40 个）："
             echo '```'
             head -40 /tmp/conflicts.txt 2>/dev/null || echo "(没能列出)"
             echo '```'
             echo
-            echo "**这次什么都没推**（main 和 \`$PRODUCT\` 都保持原样）。处理办法："
+            echo "**这次什么都没推**：main 已经快进到上游，product 保持原样。"
             echo
+            echo "手工处理："
             echo '```sh'
-            echo "git fetch https://github.com/${UPSTREAM_REPO}.git ${UP_BRANCH}"
-            echo "git diff --binary ${BASE:0:10} FETCH_HEAD > /tmp/up.patch"
-            echo "git apply --3way /tmp/up.patch   # 手工解冲突"
-            echo "git commit -am 'sync-upstream: 手工解决冲突'"
-            echo "echo ${NEW} > .github/upstream-base"
-            echo "git commit -am 'sync-upstream: 更新基点'"
+            echo "git fetch origin main"
+            echo "git checkout product"
+            echo "git merge origin/main      # 解冲突"
+            echo "git push origin product"
             echo '```'
-            echo
-            echo "然后 Actions → sync-upstream → Run workflow 再跑一次（这次会当成已同步）。"
           } > /tmp/issue.md
-          TITLE="上游同步冲突"
           NUM=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
-                  --json number,title --jq '.[] | select(.title|startswith("上游同步冲突")) | .number' \
-                  | head -1)
+                  --json number,title --jq '.[] | select(.title|startswith("上游同步冲突")) | .number' | head -1)
           if [ -n "${NUM:-}" ]; then
             gh issue comment "$NUM" --repo "$GITHUB_REPOSITORY" --body-file /tmp/issue.md
-            echo "已在 issue #$NUM 追加评论"
           else
-            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file /tmp/issue.md
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "上游同步冲突" --body-file /tmp/issue.md
           fi
           exit 1
 
-      - name: 提交并推送 main
-        if: steps.apply.outputs.ok == 'true' && inputs.dry_run != true
-        run: |
-          set -euo pipefail
-          echo "$NEW" > .github/upstream-base
-          git add -A
-          git commit -m "sync-upstream: 上游 ${UP_BRANCH} ${BASE:0:10}..${NEW:0:10} [skip ci]"
-          git push origin HEAD:main
-
-      - name: 合并 main → 产品分支
-        if: steps.apply.outputs.ok == 'true' && inputs.dry_run != true
-        id: prod
-        run: |
-          set -uo pipefail
-          if ! git fetch origin "$PRODUCT" >/dev/null 2>&1; then
-            echo "产品分支 $PRODUCT 不存在，跳过"; exit 0
-          fi
-          git checkout -B "$PRODUCT" "origin/$PRODUCT"
-          if git merge --no-ff --no-edit -m "merge main → $PRODUCT（上游同步）[skip ci]" main; then
-            git push origin HEAD:"$PRODUCT"
-            echo "✅ $PRODUCT 已跟上 main"
-          else
-            git ls-files -u | awk '{print $4}' | sort -u > /tmp/pconf.txt || true
-            git merge --abort || true
-            {
-              echo "main 同步上游成功，但合进 \`$PRODUCT\` 时冲突了。"
-              echo
-              echo '```'
-              head -40 /tmp/pconf.txt 2>/dev/null || echo "(没能列出)"
-              echo '```'
-              echo
-              echo "main 已经推上去了；产品分支需要人工合一次："
-              echo '```sh'
-              echo "git fetch origin && git checkout $PRODUCT && git merge origin/main"
-              echo '```'
-            } > /tmp/pissue.md
-            NUM=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
-                    --json number,title --jq '.[] | select(.title|startswith("产品分支合并冲突")) | .number' \
-                    | head -1)
-            if [ -n "${NUM:-}" ]; then
-              gh issue comment "$NUM" --repo "$GITHUB_REPOSITORY" --body-file /tmp/pissue.md
-            else
-              gh issue create --repo "$GITHUB_REPOSITORY" --title "产品分支合并冲突" --body-file /tmp/pissue.md
-            fi
-            exit 1
-          fi
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: 干跑收尾
-        if: steps.apply.outputs.ok == 'true' && inputs.dry_run == true
-        run: |
-          echo "dry_run：上游 ${BASE:0:10}..${NEW:0:10} 能干净应用，没有提交。"
-          git status --short | head -20
+      - name: 推送 product
+        if: steps.up.outputs.changed == 'true' && steps.merge.outputs.ok == 'true' && inputs.dry_run != true
+        run: git push origin "HEAD:${PRODUCT_BRANCH}"

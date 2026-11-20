@@ -65,7 +65,7 @@ on:
         type: boolean
         default: false
   push:
-    branches: [main]
+    branches: [product]
     paths:
       - 'defconfig/**'
       - 'feeds.conf.default'
