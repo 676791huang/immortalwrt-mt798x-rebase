@@ -1,7 +1,6 @@
-# fastpath 的合法取值：disabled / flow_offloading / fast_classifier /
-# shortcut_fe_cm / mediatek_hnat。原来写的 'none' 不是合法值，
-# 会让 init 脚本匹配不到分支（HNAT 开关状态实际不确定）。
-# 想用硬件加速：改成 mediatek_hnat（此时不要开 SQM）。
+# 默认开 MediaTek HNAT 硬件加速（近线速转发）。
+# 注意：HNAT 会把已建立的流交给 PPE，CPU 上的 cake/IFB 看不到这些包，
+# 所以开了 HNAT 就不要开 SQM 整形；两者只能选一个。
 config turboacc 'config'
-	option fastpath 'disabled'
+	option fastpath 'mediatek_hnat'
 	option tcpcca 'bbr'
