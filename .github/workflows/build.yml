@@ -130,6 +130,9 @@ jobs:
 
       # ── 缓存指纹 ──────────────────────────────────────────────────────
       # 一次算好，后面所有 cache key 都引用这些输出，避免每层各算各的。
+      - name: 容器内放行 git 安全目录
+        run: git config --global --add safe.directory '*'
+
       - name: 计算缓存指纹
         id: fp
         run: |
