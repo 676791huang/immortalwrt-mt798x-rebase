@@ -9,3 +9,11 @@ uci -q set 5gmodem.@5gmodem[0].signal_leds='0'
 uci -q set 5gmodem.@5gmodem[0].auto_port='1'
 uci -q commit 5gmodem 2>/dev/null
 exit 0
+
+# 让接口取名修复在每次启动都执行（mkiface.sh 的 /dev/ 前缀问题），
+# 首次开机先跑一遍，避免已经生成的接口带着错误路径。
+[ -x /etc/init.d/openfi-5gmodem-fix ] && {
+	/etc/init.d/openfi-5gmodem-fix enable
+	/etc/init.d/openfi-5gmodem-fix boot
+}
+exit 0
