@@ -112,6 +112,8 @@ jobs:
       run:
         shell: bash
     env:
+      # 容器里以 root 编译，部分 configure 会拒绝 root
+      FORCE_UNSAFE_CONFIGURE: '1'
       # 配了这四个 secret 就走 R2 存编译目录（比 actions/cache 快），没配就退回 actions/cache
       R2_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -418,13 +420,6 @@ jobs:
           echo "OK: openfi-lib（被 DEPENDS 自动带进来）"
 
       # ── 下载 + 编译 ───────────────────────────────────────────────────
-      # 诊断/自愈：单独编 tools/tar，失败时能看到真实报错
-      - name: 预处理 tools/tar（V=s）
-        continue-on-error: true
-        run: |
-          make tools/tar/clean >/dev/null 2>&1 || true
-          make tools/tar/compile V=s 2>&1 | tail -80
-
       - name: 下载源码包
         run: |
           # dl 缓存命中时这一步主要是校验已有文件，很快；缺的才会下载。

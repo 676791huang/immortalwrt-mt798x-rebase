@@ -2,7 +2,8 @@
 # 目的：把 apt 装依赖那 ~9 分钟预烤进镜像，构建时直接 `container:` 用。
 FROM ubuntu:24.04
 
-ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8
+ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 \
+    FORCE_UNSAFE_CONFIGURE=1
 # 容器里以 root 运行；工作区/缓存里的 git 仓库属于 runner 用户，需放行
 RUN git config --system --add safe.directory '*' 
 
