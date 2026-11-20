@@ -3,14 +3,17 @@ name: sync-upstream
 # ── 每天把上游 chasey-dev/immortalwrt-mt798x-rebase 的 25.12 合进来 ────────
 #
 # 分支模型（本仓库是上游的 fork）：
-#   main    = 上游镜像，只做快进，内容永远等于上游 25.12
+#   main    = 上游镜像，只做快进，内容永远等于上游 25.12（只允许 Actions 推）
 #   product = 我们的树；main 合进来，冲突在这里解
 #
 # 流程：
 #   ① fetch 上游 25.12；
-#   ② main 快进到上游 tip（不是后代就报错停下，防止被 force-push 搞乱）；
-#   ③ 只有上游有新提交时，才把 main merge 进 product；
-#   ④ 冲突：一个字节都不推，开/更新 issue，列出冲突文件和上游提交范围。
+#   ② main 快进到上游 tip（不是后代就报错停下，防 force-push 搞乱）；
+#   ③ 上游有新提交时，把 main merge 进 product；
+#   ④ 冲突：一个字节都不推，开/更新 issue；
+#   ⑤ 闸门 A：上游若动到我们改过的上游文件（hnat / 设备树 / filogic.mk…），
+#      开 issue 要求人工复核 —— 能合并不等于语义正确；
+#   ⑥ 闸门 B：同步成功后自动触发一次固件构建，炸了在 Actions 里一看就知道。
 
 on:
   schedule:
@@ -18,13 +21,14 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: '只试不合（不推送）'
+        description: '只试不合（不快进 main、不推 product、不触发构建）'
         type: boolean
         default: false
 
 permissions:
   contents: write
   issues: write
+  actions: write          # 触发 build 用
 
 concurrency:
   group: sync-upstream
@@ -35,10 +39,12 @@ env:
   UPSTREAM_BRANCH: '25.12'
   MIRROR_BRANCH: main
   PRODUCT_BRANCH: product
+  # 我们改过的「上游文件」：上游一动到它们就必须人来看一眼
+  RISK_PATHS: 'target/linux/mediatek/dts/mt7981b-openfi-6c.dts target/linux/mediatek/files-6.12/drivers/net/ethernet/mediatek/mtk_hnat/hnat.c target/linux/mediatek/files-6.12/drivers/net/ethernet/mediatek/mtk_hnat/hnat.h target/linux/mediatek/files-6.12/drivers/net/ethernet/mediatek/mtk_hnat/hnat_debugfs.c target/linux/mediatek/files-6.12/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c target/linux/mediatek/filogic/base-files/etc/board.d/01_leds target/linux/mediatek/filogic/base-files/etc/board.d/02_network target/linux/mediatek/image/filogic.mk'
 
 jobs:
   sync:
-    name: 上游 → main（快进）→ product（合并）
+    name: 上游 → main（快进）→ product（合并）→ 复核 / 构建
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -90,6 +96,7 @@ jobs:
           NEW: ${{ steps.up.outputs.new }}
         run: |
           set -uo pipefail
+          echo "old=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           git fetch --no-tags origin "${MIRROR_BRANCH}" || true
           if git merge --no-ff --no-edit -m "merge main ← 上游 ${UPSTREAM_BRANCH} [skip ci]" "$NEW"; then
             echo "ok=true" >> "$GITHUB_OUTPUT"
@@ -139,3 +146,71 @@ jobs:
       - name: 推送 product
         if: steps.up.outputs.changed == 'true' && steps.merge.outputs.ok == 'true' && inputs.dry_run != true
         run: git push origin "HEAD:${PRODUCT_BRANCH}"
+
+      # ── 闸门 A：上游有没有动到我们的补丁文件 ──────────────────────────
+      - name: 闸门 A：检查是否动到我们的补丁文件
+        if: steps.up.outputs.changed == 'true' && steps.merge.outputs.ok == 'true'
+        id: risk
+        env:
+          NEW: ${{ steps.up.outputs.new }}
+          OLD_PRODUCT: ${{ steps.merge.outputs.old }}
+        run: |
+          set -uo pipefail
+          CHANGED=$(git diff --name-only "$OLD_PRODUCT" "$NEW" -- $RISK_PATHS || true)
+          if [ -z "$CHANGED" ]; then
+            echo "touched=false" >> "$GITHUB_OUTPUT"
+            echo "上游没动我们的补丁文件，放行"
+            exit 0
+          fi
+          echo "touched=true" >> "$GITHUB_OUTPUT"
+          git diff --stat "$OLD_PRODUCT" "$NEW" -- $RISK_PATHS > /tmp/risk.stat || true
+          git diff "$OLD_PRODUCT" "$NEW" -- $RISK_PATHS | head -200 > /tmp/risk.diff || true
+          echo "⚠️ 上游动到了："; cat /tmp/risk.stat
+
+      - name: 闸门 A：开/更新「需人工复核」issue
+        if: steps.risk.outputs.touched == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          RANGE="${{ steps.up.outputs.range }}"
+          {
+            echo "自动同步上游 **${RANGE}** 时，上游改到了我们打过补丁的文件。"
+            echo
+            echo "- 上游范围：https://github.com/${UPSTREAM_REPO}/compare/${RANGE}"
+            echo "- 已合进 \`product\`（没有 git 冲突，但**语义可能变了**）"
+            echo
+            echo "改动统计："
+            echo '```'
+            cat /tmp/risk.stat 2>/dev/null || echo "(无)"
+            echo '```'
+            echo
+            echo "<details><summary>上游这部分 diff（前 200 行，点开）</summary>"
+            echo
+            echo '```diff'
+            cat /tmp/risk.diff 2>/dev/null || echo "(无)"
+            echo '```'
+            echo
+            echo "</details>"
+            echo
+            echo "**重点看 hnat**：漫游/绑定/offload 语义改过，我们的补丁可能还在按旧逻辑跑。"
+            echo "确认没问题就把这个 issue 关掉；有问题就在 \`product\` 上改完再关。"
+          } > /tmp/risk-issue.md
+          NUM=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+                  --json number,title --jq '.[] | select(.title|startswith("需人工复核：上游动到了我们的补丁文件")) | .number' | head -1)
+          if [ -n "${NUM:-}" ]; then
+            gh issue comment "$NUM" --repo "$GITHUB_REPOSITORY" --body-file /tmp/risk-issue.md
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" \
+              --title "需人工复核：上游动到了我们的补丁文件" --body-file /tmp/risk-issue.md
+          fi
+
+      # ── 闸门 B：同步成功后自动构建一次 ────────────────────────────────
+      - name: 闸门 B：触发固件构建
+        if: steps.up.outputs.changed == 'true' && steps.merge.outputs.ok == 'true' && inputs.dry_run != true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run build.yml --repo "$GITHUB_REPOSITORY" \
+            --ref "$PRODUCT_BRANCH" -f publish=false
+          echo "已触发 build（publish=false，产物在 Actions 里）"
