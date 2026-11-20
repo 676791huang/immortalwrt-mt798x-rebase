@@ -811,7 +811,8 @@ static void hnat_flow_entry_teardown_enable(void)
 
 static void hnat_flow_entry_teardown_disable(void)
 {
-	cancel_delayed_work(&_hnat_flow_entry_teardown_work);
+	/* the handler re-arms itself; wait for it to finish */
+	cancel_delayed_work_sync(&_hnat_flow_entry_teardown_work);
 }
 
 static int is_cah_ctrl_request_done(u32 ppe_id)
@@ -1972,6 +1973,7 @@ static int hnat_probe(struct platform_device *pdev)
 	hnat_flow_entry_teardown_enable();
 
 	INIT_LIST_HEAD(&hnat_priv->xlat.map_list);
+	spin_lock_init(&hnat_priv->xlat.lock);
 	INIT_LIST_HEAD(&hnat_priv->mcast_blist_list);
 
 	hnat_api_init();
@@ -1989,8 +1991,11 @@ err_out1:
 		kfree(ext_entry);
 	}
 err_out2:
-	for (i = 0; i < MAX_PPE_NUM; i++)
-		mtk_set_ppe_pse_port_state(i, false);
+	/* fe_base is mapped late in probe; earlier error paths must not touch it */
+	if (hnat_priv && hnat_priv->fe_base) {
+		for (i = 0; i < MAX_PPE_NUM; i++)
+			mtk_set_ppe_pse_port_state(i, false);
+	}
 	return err;
 }
 
