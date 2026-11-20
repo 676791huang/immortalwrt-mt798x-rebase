@@ -1,0 +1,617 @@
+name: build
+
+# ═══════════════════════════════════════════════════════════════════════════
+# OpenFi 6C 固件编译 —— chasey-dev/immortalwrt-mt798x-rebase @ 25.12 定制树
+#
+# 目标：**第一次之后要快**。
+#   冷构建（无任何缓存）约 60~90 分钟；缓存命中、只有小改动的增量构建
+#   一般在 5~15 分钟以内（大头是 restore + feeds + 打包镜像）。
+#
+# ── 缓存五层（GitHub 每仓库总上限 10 GB，按最后访问时间 LRU 淘汰）────────
+#
+#   ① dl/                源码包                        ~1.5 GB  按周一个 key
+#   ② feeds/             feeds 的 5 个 git 仓库        ~0.3 GB  按周一个 key
+#   ③ staging_dir + toolchain + build_dir/host
+#                        交叉工具链 + 宿主工具         ~1.2 GB  key 只看工具链版本
+#   ④ build_dir/target-* 内核 + 所有包的编译目录       ~3.0 GB  ★ 每轮滚动更新
+#   ⑤ .ccache            编译器结果缓存                ~1.0 GB  按周一个 key
+#
+# ── 为什么 ④ 是"下次编译时间最少"的关键 ─────────────────────────────────
+#   只缓存工具链和内核时，每次 make 仍会把所有包（含闭源 mt_wifi 那套）重新
+#   解包 / configure / 编译一遍 —— 这才是"第二次还要 30 分钟"的原因。
+#   把 build_dir/target-* 留下来之后，没变的包 make 直接跳过（OpenWrt 用
+#   源码目录的 md5 做 stamp，不靠 mtime，所以本地 checkout 的时间戳变化
+#   不会造成全量重编），只剩改动过的包 + 打包镜像。
+#
+#   ④ 的 key 里带【内核指纹】（files-6.12 / patches-6.12 / kernel config）：
+#   改驱动时内核必须真的重编，不能拿旧内核凑数。内核指纹变了 → 这层缓存
+#   精确匹配不上、restore-keys 也刻意不跨内核回退 → 这一轮做干净构建。
+#   改我们自己的包（package/openfi/**）不会动 key，那一层缓存照样命中，
+#   只有被改的包会重编。
+#
+# ── key 怎么选（踩过坑，别乱改）──────────────────────────────────────────
+#   · ③ 的 key【故意不含】defconfig：工具链只跟内核版本 / 工具链版本 / feed
+#     列表有关，跟"选了哪些包"无关。带 defconfig 的话，改一行配置就白重建 40 分钟。
+#   · ④ 的 key 带 run_id → 永远精确命中不了，靠 restore-keys 拿上一轮存的那份，
+#     编完再存一份新的（滚动更新，保证下一轮拿到的是"最新"状态）。
+#   · ⑤ 用周 key：一周内命中同一份，不会每轮都重新存一遍 ccache。
+#
+# ── 保存策略 ─────────────────────────────────────────────────────────────
+#   用 restore/save 分开写（而不是 actions/cache@v4 一把梭）：
+#     · 编译失败也要把已经编好的东西存下来（失败往往发生在最后几个包）；
+#     · 但【被取消】时不存 —— 半成品 .built 会污染下一轮，报一堆莫名其妙的错。
+#     · success() || failure() 正好排除 cancelled()。
+#
+# ── 想强制干净重编 ───────────────────────────────────────────────────────
+#   Actions → build → Run workflow → 勾上 clean_build。
+#
+# ── 产物 ─────────────────────────────────────────────────────────────────
+#   · Artifact：sysupgrade 固件 + md5 + 编译日志（保留 30 / 7 天）
+#   · workflow_dispatch 且 publish=true 时，额外建一个 Release
+#
+# 我们的三个 LuCI 包在 package/openfi/ 下（树内编译，不走 feed），defconfig
+# 里已经选中；改包直接跟着固件提交，不需要等 feed 推送。
+# ═══════════════════════════════════════════════════════════════════════════
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: '编译成功后创建 Release'
+        type: boolean
+        default: true
+      clean_build:
+        description: '忽略缓存做一次干净构建（排查缓存问题用）'
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - 'defconfig/**'
+      - 'feeds.conf.default'
+      # 我们自己的包和检查脚本
+      - 'package/openfi/**'
+      - 'scripts/openfi/**'
+      # 设备支持
+      - 'target/linux/mediatek/dts/mt7981b-openfi-6c.dts'
+      - 'target/linux/mediatek/image/filogic.mk'
+      - 'target/linux/mediatek/filogic/base-files/**'
+      # 内核补丁 / 驱动基线（改了必须重编，且必须能触发构建）
+      - 'target/linux/mediatek/patches-6.12/**'
+      - 'target/linux/mediatek/files-6.12/**'
+      # files/ 覆盖目录（openfi-usbmode 等）
+      - 'files/**'
+      - 'tests/**'
+      - '.github/workflows/build.yml'
+  schedule:
+    # 每周一次保活：GitHub 的缓存 7 天不访问就会被清掉，
+    # 顺便验证上游 / feed 的最新状态还能编过。UTC 18:00 = 北京时间周一 02:00。
+    - cron: '0 18 * * 0'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-openfi6c-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 缓存命名空间：改了缓存策略（路径 / 内容）就把这里 +1，旧缓存自动作废。
+  CACHE_NAMESPACE: ofc25
+
+jobs:
+  build:
+    name: 编译 OpenFi 6C (25.12 / 6.12)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: 生成版本号
+        id: ver
+        run: |
+          TAG="v25.12-openfi6c-$(TZ=Asia/Shanghai date +%Y%m%d-%H%M)"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "版本号: $TAG"
+
+      - name: 取出源码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # ── 缓存指纹 ──────────────────────────────────────────────────────
+      # 一次算好，后面所有 cache key 都引用这些输出，避免每层各算各的。
+      - name: 计算缓存指纹
+        id: fp
+        run: |
+          set -eu
+          week=$(date -u +%G%V)
+
+          # 工具链 / 宿主工具的身份：内核版本 + gcc 版本 + feed 列表 + 顶层规则
+          tc=$( { sha256sum include/kernel-version.mk toolchain/gcc/Config.version \
+                        feeds.conf.default rules.mk 2>/dev/null || true; } \
+                | sha256sum | cut -c1-16 )
+
+          # 配置身份：只影响"选哪些包"，不影响工具链
+          cfg=$(sha256sum defconfig/openfi6c.config | cut -c1-16)
+
+          # 内核身份：内核版本 + 板级 Makefile + kernel config + 我们的补丁 / 驱动源
+          kern=$( { sha256sum include/kernel-version.mk target/linux/mediatek/Makefile \
+                        target/linux/mediatek/filogic/config-6.12 \
+                        target/linux/generic/config-6.12; \
+                    find target/linux/mediatek/files-6.12 target/linux/mediatek/patches-6.12 \
+                      -type f -print0 | sort -z | xargs -0 sha256sum; } \
+                  | sha256sum | cut -c1-16 )
+
+          {
+            echo "week=$week"
+            echo "toolchain=$tc"
+            echo "config=$cfg"
+            echo "kernel=$kern"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "工具链指纹: $tc"
+          echo "配置指纹:   $cfg"
+          echo "内核指纹:   $kern"
+          echo "ISO 周:     $week"
+
+      - name: 释放磁盘空间
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost \
+            /opt/google/chrome /usr/share/swift "$AGENT_TOOLSDIRECTORY" 2>/dev/null || true
+          timeout 60 sudo apt-get clean || true
+          df -h /
+
+      - name: 安装编译依赖
+        run: |
+          PKGS="build-essential clang flex bison g++ gawk gcc-multilib g++-multilib
+                gettext git libncurses-dev libssl-dev libelf-dev zlib1g-dev
+                python3 python3-dev python3-setuptools python3-pyelftools python3-ply
+                rsync unzip file wget curl ca-certificates subversion swig cmake
+                ninja-build autoconf automake libtool pkgconf ccache help2man patch
+                time xsltproc zstd liblz4-tool libzstd-dev device-tree-compiler lua5.1"
+          timeout 300 sudo apt-get update -qq || echo "::warning::apt update 超时"
+          timeout 900 sudo apt-get install -y -qq $PKGS \
+            || { echo "第一次装依赖失败,重试一次"; timeout 900 sudo apt-get install -y -qq $PKGS; }
+          for t in gcc g++ make python3 unzip rsync dtc timeout ccache; do
+            command -v "$t" >/dev/null 2>&1 && echo "  ✅ $t" || { echo "::error::缺少 $t"; exit 1; }
+          done
+          # ccache 版本必须够新，否则 CCACHE_SLOPPINESS 的部分选项不认
+          ccache --version | head -1
+
+      # ── 板级自检 ──────────────────────────────────────────────────────
+      # 一两秒跑完，但能挡住"设备名写错 / defconfig 没选设备 / feed 没挂 /
+      # 包 Makefile 解析失败"这类会让构建白跑一小时的错误。
+      - name: 自检（板级接线）
+        run: |
+          set -eu
+          fail=0
+          chk() { if [ -e "$1" ]; then echo "OK: $1"; else echo "::error::缺少 $1"; fail=1; fi; }
+          chk defconfig/openfi6c.config
+          chk target/linux/mediatek/dts/mt7981b-openfi-6c.dts
+          chk target/linux/mediatek/image/filogic.mk
+          chk feeds.conf.default
+
+          # 用 musl 编一遍我们的源码：glibc 会把 <sys/select.h> 这类头间接带进来，
+          # musl 不会 —— 同一份代码本地编得过、目标机上就是硬错误。
+          # 装不上就跳过（不阻塞），有超时，别卡在 apt 上。
+          if command -v apt-get >/dev/null 2>&1 && ! command -v musl-gcc >/dev/null 2>&1; then
+            timeout 90 sudo apt-get install -y -qq musl-tools >/dev/null 2>&1 \
+              || timeout 120 sh -c 'sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools' >/dev/null 2>&1 \
+              || echo "::warning::musl-tools 装不上,跳过目标环境编译检查"
+          fi
+          if grep -vE '^[[:space:]]*#' scripts/openfi/check-musl.sh \
+               | grep -q 'dirname "\$0")/\.\.'; then
+            echo "::error::check-musl.sh 又用了按固定层级回退的 cd —— 从别的目录调用会失败"
+            fail=1
+          fi
+          if ! timeout 240 sh scripts/openfi/check-musl.sh; then
+            echo "::warning::musl 编译检查没跑完(超时或有问题) —— 看上面的输出"
+          fi
+
+          # 5G 面板已交给 feed 里的 luci-app-5gmodem（完整版），我们自己的
+          # 模组/短信包和 usbmode 脚本已删；这里只防呆，防止它们又被加回来。
+          for p in luci-app-openfi-fan openfi-lib; do
+            [ -d "package/openfi/$p" ] || { echo "::error::缺少 package/openfi/$p"; fail=1; }
+          done
+          for p in luci-app-openfi-modem luci-app-openfi-sms; do
+            [ -d "package/openfi/$p" ] && { echo "::error::package/openfi/$p 应已删除"; fail=1; }
+          done
+
+          # 跨包一致性：JS 的 uci 引用 / ACL / uci-defaults 配置文件必须指向同一个配置
+          [ -x scripts/openfi/check-consistency.sh ] && { sh scripts/openfi/check-consistency.sh || fail=1; }
+
+          # apk 换源脚本：真跑一遍（造个假源列表），并检查幂等
+          if [ -f files/etc/uci-defaults/95-openfi-apk-mirror ]; then
+            T=$(mktemp -d)
+            cat > "$T/distfeeds.list" <<'EOFLIST'
+          https://downloads.immortalwrt.org/releases/25.12-SNAPSHOT/packages/aarch64_cortex-a53/base
+          https://downloads.immortalwrt.org/releases/25.12-SNAPSHOT/packages/aarch64_cortex-a53/video
+          https://downloads.immortalwrt.org/releases/25.12-SNAPSHOT/targets/mediatek/filogic/packages
+          EOFLIST
+            OPENFI_APK_DIR="$T" sh files/etc/uci-defaults/95-openfi-apk-mirror >/dev/null 2>&1
+            grep -q 'mirror.nju.edu.cn' "$T/distfeeds.list" \
+              || { echo '::error::换源脚本没有把官方域名换成南大'; fail=1; }
+            grep -q '^https://downloads.immortalwrt.org' "$T/distfeeds.list" \
+              && { echo '::error::换源后还残留官方域名'; fail=1; } || true
+            grep -q '^#.*video' "$T/distfeeds.list" \
+              || { echo '::error::会 404 的 video 源没被注释掉'; fail=1; }
+            grep -q 'targets/mediatek/filogic' "$T/distfeeds.list" \
+              || { echo '::error::板级源被误删了'; fail=1; }
+            [ -f "$T/distfeeds.list.orig" ] \
+              || { echo '::error::没有备份原文件'; fail=1; }
+            BEFORE=$(cat "$T/distfeeds.list")
+            OPENFI_APK_DIR="$T" sh files/etc/uci-defaults/95-openfi-apk-mirror >/dev/null 2>&1
+            [ "$BEFORE" = "$(cat "$T/distfeeds.list")" ] \
+              || { echo '::error::换源脚本不是幂等的'; fail=1; }
+            rm -rf "$T"
+          fi
+
+          echo "----- defconfig 选的是我们的设备吗 -----"
+          grep -q '^CONFIG_TARGET_mediatek_filogic_DEVICE_openfi_6c=y' defconfig/openfi6c.config \
+            || { echo "::error::defconfig 没选 openfi_6c"; fail=1; }
+          grep -q '^CONFIG_TARGET_MULTI_PROFILE=y' defconfig/openfi6c.config \
+            && { echo "::error::defconfig 里还有 MULTI_PROFILE，会连别的板子一起编"; fail=1; } || true
+
+          echo "----- 设备定义 & 关键项 -----"
+          for k in 'define Device/openfi_6c' 'DEVICE_DTS := mt7981b-openfi-6c' \
+                   'SUPPORTED_DEVICES += openfi,6c' 'kmod-usb-net-cdc-ncm' 'kmod-usb-net-rndis'; do
+            grep -q "$k" target/linux/mediatek/image/filogic.mk \
+              || { echo "::error::filogic.mk 里缺少: $k"; fail=1; }
+          done
+
+          echo "----- 树内包能被扫到吗 -----"
+          # Makefile 里不能用 C 风格注释，否则 make 解析失败、扫描器静默跳过，
+          # 最后报的是"依赖不存在"，很难查。
+          for p in openfi-lib luci-app-openfi-fan; do
+            f="package/openfi/$p/Makefile"
+            [ -e "$f" ] || { echo "::error::缺少 $f"; fail=1; continue; }
+            grep -qE '^[[:space:]]*/\*|^[[:space:]]*\*/' "$f" \
+              && { echo "::error::$f 里有 C 风格注释，make 解析会失败"; fail=1; }
+            grep -q 'call BuildPackage' "$f" \
+              || { echo "::error::$f 里没有 call BuildPackage，扫描器看不见它"; fail=1; }
+          done
+
+          echo "----- LED 名字核对（改错不报错，只是灯不亮）-----"
+          python3 scripts/openfi/check-leds.py \
+            || { echo "::error::LED 名字对不上，编出来灯不会亮"; fail=1; }
+
+          [ "$fail" -eq 0 ] || exit 1
+          echo "✅ 板级接线自检通过"
+
+      # ── 缓存目录占位 ──────────────────────────────────────────────────
+      # actions/cache 对"路径一个都不存在"会报 Path Validation Error；
+      # 先把目录建出来。target 目录名由 ARCH/CPU/LIBC 决定，本设备固定是
+      # aarch64_cortex-a53 + musl，所以这里直接写死（换 SoC 时一起改）。
+      - name: 准备缓存目录
+        run: |
+          mkdir -p dl feeds toolchain staging_dir build_dir/host .ccache
+          mkdir -p build_dir/target-aarch64_cortex-a53_musl
+
+      # ── ① dl/ 源码包 ─────────────────────────────────────────────────
+      - name: ① 恢复 dl/（源码包）
+        id: c_dl
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.clean_build != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: dl
+          key: ${{ env.CACHE_NAMESPACE }}-dl-${{ hashFiles('feeds.conf.default') }}-${{ steps.fp.outputs.week }}
+          restore-keys: |
+            ${{ env.CACHE_NAMESPACE }}-dl-
+
+      # ── ② feeds/（5 个 git 仓库）──────────────────────────────────────
+      - name: ② 恢复 feeds/
+        id: c_feeds
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.clean_build != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: feeds
+          key: ${{ env.CACHE_NAMESPACE }}-feeds-${{ hashFiles('feeds.conf.default') }}-${{ steps.fp.outputs.week }}
+          restore-keys: |
+            ${{ env.CACHE_NAMESPACE }}-feeds-
+
+      - name: 更新并安装 feeds
+        run: |
+          set -eu
+          # 命中本周缓存就跳过 update —— feeds 在这一周内固定在缓存时的版本，
+          # 每轮省掉 5 个 git fetch，也保证同一周的构建来自同一份 feed。
+          # 想拿最新 feed：等下周（key 带周号）或跑 clean_build。
+          if [ "${{ steps.c_feeds.outputs.cache-hit }}" = "true" ]; then
+            echo "feeds 缓存命中（本周内冻结），跳过 update"
+          else
+            timeout 600 ./scripts/feeds update -a \
+              || { echo "::error::feeds 更新超时(git 仓库拉不下来)"; exit 1; }
+          fi
+          timeout 600 ./scripts/feeds install -a \
+            || { echo "::error::feeds 安装超时"; exit 1; }
+          echo "包版本(当前提交): $(git rev-parse --short HEAD 2>/dev/null || echo '?')"
+          ls package/openfi/ 2>/dev/null || true
+
+      # ── ③ 工具链 + 宿主工具 ───────────────────────────────────────────
+      - name: ③ 恢复工具链 + 宿主工具（省 ~40 分钟）
+        id: c_stage
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.clean_build != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            staging_dir
+            toolchain
+            build_dir/host
+          key: ${{ env.CACHE_NAMESPACE }}-stage-${{ runner.arch }}-${{ steps.fp.outputs.toolchain }}
+          restore-keys: |
+            ${{ env.CACHE_NAMESPACE }}-stage-${{ runner.arch }}-
+
+      # ── ④ 内核 + 包编译目录（增量构建的关键）───────────────────────────
+      - name: ④ 恢复内核/包编译目录（省 ~30-40 分钟）
+        id: c_td
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.clean_build != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: build_dir/target-*
+          # key 带 run_id → 永远"精确命中不了"，但 restore-keys 会拿上一轮存的那份，
+          # 编完再把新状态存一份（滚动更新），下一轮拿到的就是最新的编译状态。
+          # restore-keys 里【固定住内核指纹】：内核相关文件一变就绝不回退到旧内核目录，
+          # 这一轮老老实实干净构建（慢，但不会把旧内核编进固件）。
+          key: ${{ env.CACHE_NAMESPACE }}-td-${{ runner.arch }}-${{ steps.fp.outputs.toolchain }}-${{ steps.fp.outputs.kernel }}-${{ steps.fp.outputs.config }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ env.CACHE_NAMESPACE }}-td-${{ runner.arch }}-${{ steps.fp.outputs.toolchain }}-${{ steps.fp.outputs.kernel }}-
+
+      # ── ⑤ ccache ─────────────────────────────────────────────────────
+      - name: ccache 环境
+        run: |
+          {
+            echo "CCACHE_COMPILERCHECK=content"
+            echo "CCACHE_BASEDIR=${{ github.workspace }}"
+            # 每次 CI 都是全新 clone 的文件，mtime / ctime 全变；ccache 默认会因此
+            # 判为失效 —— 把这些 sloppiness 打开，命中率才上得去。
+            echo "CCACHE_SLOPPINESS=time_macros,include_file_ctime,include_file_mtime,file_stat_matches"
+            echo "CCACHE_COMPRESS=true"
+            echo "CCACHE_COMPRESSLEVEL=6"
+            echo "CCACHE_MAXSIZE=1G"
+          } >> "$GITHUB_ENV"
+          mkdir -p .ccache
+
+      - name: ⑤ 恢复 ccache
+        id: c_cc
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.clean_build != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: .ccache
+          key: ${{ env.CACHE_NAMESPACE }}-cc-${{ steps.fp.outputs.config }}-${{ steps.fp.outputs.week }}
+          restore-keys: |
+            ${{ env.CACHE_NAMESPACE }}-cc-
+
+      # ── 配置 ──────────────────────────────────────────────────────────
+      - name: 应用配置
+        run: |
+          set -eu
+          cp defconfig/openfi6c.config .config
+          make defconfig
+
+          echo "----- 关键配置确认 -----"
+          grep -E 'CONFIG_TARGET_mediatek_filogic_DEVICE_openfi_6c=|CONFIG_PACKAGE_kmod-mt_wifi=|CONFIG_MTK_MT_WIFI_DRIVER_VERSION_|CONFIG_PACKAGE_iwinfo-ucode=|CONFIG_CCACHE=' .config || true
+
+          grep -q '^CONFIG_TARGET_mediatek_filogic_DEVICE_openfi_6c=y' .config \
+            || { echo "::error::openfi_6c 没进 .config"; exit 1; }
+          echo "OK: 设备 = openfi_6c"
+
+          grep -q '^CONFIG_PACKAGE_kmod-mt_wifi=y' .config \
+            || { echo "::error::kmod-mt_wifi 没进 .config —— 闭源 WiFi 驱动没选上"; exit 1; }
+          echo "OK: 闭源 mt_wifi 驱动"
+
+          grep -q '^CONFIG_CCACHE=y' .config \
+            || { echo "::error::CONFIG_CCACHE 没生效，ccache 那层缓存形同虚设"; exit 1; }
+          echo "OK: CONFIG_CCACHE=y"
+
+          grep -q '^CONFIG_TARGET_ROOTFS_INITRAMFS=y' .config \
+            && { echo "::error::initramfs 被打开了 —— 我们只发 sysupgrade，不需要它"; exit 1; } || true
+          echo "OK: initramfs 已关闭"
+
+          for s in luci-app-openfi-fan luci-app-5gmodem luci-proto-mbim modemmanager kmod-sched-cake sqm-scripts; do
+            grep -q "^CONFIG_PACKAGE_${s}=y" .config \
+              || { echo "::error::${s} 没进 .config"; exit 1; }
+            echo "OK: ${s}=y"
+          done
+          grep -q "^CONFIG_PACKAGE_openfi-lib=" .config \
+            || { echo "::error::openfi-lib 没被依赖带进来"; exit 1; }
+          echo "OK: openfi-lib（被 DEPENDS 自动带进来）"
+
+      # ── 下载 + 编译 ───────────────────────────────────────────────────
+      - name: 下载源码包
+        run: |
+          # dl 缓存命中时这一步主要是校验已有文件，很快；缺的才会下载。
+          timeout 1800 make download -j"$(nproc)" \
+            || { echo "并行下载超时,改成串行再试一次"; timeout 1800 make download -j1 V=s; }
+
+      - name: 编译
+        id: compile
+        run: |
+          set -o pipefail
+          START=$(date +%s)
+          time timeout 10800 make -j"$(($(nproc) + 1))" 2>&1 | tee /tmp/build.log
+          END=$(date +%s)
+          echo "编译耗时: $(( (END-START)/60 )) 分 $(( (END-START)%60 )) 秒"
+          echo "duration=$((END-START))" >> "$GITHUB_OUTPUT"
+
+      - name: 编译失败诊断
+        if: failure() && steps.compile.outcome == 'failure'
+        run: |
+          echo "===================== 错误行 ====================="
+          grep -nE '(Error [0-9]+|error:|ERROR:|undefined reference|No rule to make target|fatal error|Hunk #.*FAILED|patch.*failed|Duplicate label|syntax error)' \
+            /tmp/build.log | tail -n 60 || true
+          echo ""
+          echo "===================== 日志最后 200 行 ====================="
+          tail -n 200 /tmp/build.log || true
+
+      # DEVICE_PACKAGES 不进 .config，只能在编完后从镜像清单里核对 ——
+      # 这是唯一能证明「USB 驱动真的进了固件」的地方（5G 模组能不能用就看它）。
+      - name: 断言镜像里带上了 USB 驱动
+        if: success()
+        run: |
+          set -eu
+          M=$(find bin/targets/mediatek/filogic -maxdepth 1 -name '*.manifest' | head -1)
+          [ -n "$M" ] || { echo "::error::找不到 manifest"; ls -la bin/targets/mediatek/filogic/ || true; exit 1; }
+          fail=0
+          for p in kmod-usb3 kmod-usb-net-cdc-ncm kmod-usb-net-rndis kmod-usb-net-cdc-ether \
+                   kmod-usb-serial-option kmod-usb-storage; do
+            if grep -q "^$p " "$M"; then echo "OK: $p"; else echo "::error::镜像里没有 $p —— 5G 模组的数据通道会缺驱动"; fail=1; fi
+          done
+          [ "$fail" -eq 0 ] || exit 1
+
+      - name: ccache 命中统计
+        if: always()
+        run: |
+          staging_dir/host/bin/ccache -s 2>/dev/null || ccache -s 2>/dev/null || echo "（首次构建，ccache 还没生成）"
+          du -sh .ccache dl feeds staging_dir build_dir/host build_dir/target-* 2>/dev/null || true
+
+      # ── 保存缓存 ──────────────────────────────────────────────────────
+      # 条件统一是：不是被取消 && 精确 key 没命中。
+      # 精确命中说明这份内容已经存过，再存会报 "cache already exists"。
+
+      - name: ① 保存 dl/
+        if: (success() || failure()) && steps.c_dl.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: dl
+          key: ${{ env.CACHE_NAMESPACE }}-dl-${{ hashFiles('feeds.conf.default') }}-${{ steps.fp.outputs.week }}
+
+      - name: ② 保存 feeds/
+        if: (success() || failure()) && steps.c_feeds.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: feeds
+          key: ${{ env.CACHE_NAMESPACE }}-feeds-${{ hashFiles('feeds.conf.default') }}-${{ steps.fp.outputs.week }}
+
+      - name: ③ 保存工具链 + 宿主工具
+        if: (success() || failure()) && steps.c_stage.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            staging_dir
+            toolchain
+            build_dir/host
+          key: ${{ env.CACHE_NAMESPACE }}-stage-${{ runner.arch }}-${{ steps.fp.outputs.toolchain }}
+
+      # ④ 每轮都存（key 带 run_id，永远不会"已存在"）。
+      # 这是滚动缓存：下一轮 restore-keys 会拿到这一轮最新的编译状态。
+      - name: ④ 保存内核/包编译目录
+        if: success() || failure()
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: build_dir/target-*
+          key: ${{ env.CACHE_NAMESPACE }}-td-${{ runner.arch }}-${{ steps.fp.outputs.toolchain }}-${{ steps.fp.outputs.kernel }}-${{ steps.fp.outputs.config }}-${{ github.run_id }}
+
+      - name: ⑤ 保存 ccache
+        if: (success() || failure()) && steps.c_cc.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: .ccache
+          key: ${{ env.CACHE_NAMESPACE }}-cc-${{ steps.fp.outputs.config }}-${{ steps.fp.outputs.week }}
+
+      # ── 产物 ──────────────────────────────────────────────────────────
+      - name: 收集产物 + 生成 MD5
+        if: success()
+        run: |
+          set -eu
+          mkdir -p out
+          FW=$(find bin/targets/mediatek/filogic -maxdepth 1 -type f -name '*openfi_6c*sysupgrade.bin' | head -1)
+          [ -n "$FW" ] || { echo "::error::没找到 sysupgrade 固件"; ls -la bin/targets/mediatek/filogic/ || true; exit 1; }
+          cp "$FW" out/
+          B=$(basename "$FW")
+          ( cd out && md5sum "$B" > "$B.md5.txt" )
+          ls -lh out/
+          cat out/*.md5.txt
+
+      - name: 上传编译日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-${{ steps.ver.outputs.tag }}
+          path: /tmp/build.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: 上传固件
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: openfi6c-${{ steps.ver.outputs.tag }}
+          path: out/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 创建 Release（可选）
+        if: success() && (github.event_name != 'workflow_dispatch' || github.event.inputs.publish != 'false')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          TAG="${{ steps.ver.outputs.tag }}"
+          if timeout 60 gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            TAG="${TAG}-$(git rev-parse --short HEAD)"
+          fi
+          FWNAME=$(cd out && ls | grep sysupgrade | head -1)
+          cat > /tmp/notes.md <<NOTES
+          ## OpenFi 6C 固件 $TAG
+
+          | 项目 | 值 |
+          |---|---|
+          | 底座 | `chasey-dev/immortalwrt-mt798x-rebase` @ `25.12`（内核 6.12.112） |
+          | WiFi | 联发科闭源 `mt_wifi`（2.4G / 5G）+ WED/PPE 驱动 |
+          | 加速 | turboacc 默认 **关 HNAT 快路**（把包留给 CPU 的 qdisc），BBR 开 |
+          | WAN | 5G 模组 `RM500U-CN`：NCM 自拨（`usb0` / dhcp）即可上网 |
+          | 模组面板 | `luci-app-5gmodem` 完整版（状态/短信/AT 终端/锁频/USSD/温度） |
+          | 风扇 | `luci-app-openfi-fan`（读 5gmodem 的 `/tmp/5gmodem/tele.json`） |
+          | 延迟控制 | `sqm-scripts` + CAKE 已编入，**出场关闭**；测速后填带宽再开 |
+
+          ### 刷机
+
+          ```sh
+          sysupgrade -n /tmp/$FWNAME
+          ```
+
+          - 默认 LAN **`192.168.1.1`**，WAN 走 USB 模组
+          - 首次登录请设置 root 密码；WiFi 默认不加密
+          - 从其它固件刷入请**不要保留配置**（`-n`）
+
+          ### 刷完请注意
+
+          - 首次开机会自动探测模组并接管 `wan`，约 30~60 秒后上网；期间面板可能显示"检测中"
+          - 想用 SQM 压延迟：LuCI → 网络 → SQM QoS，接口 `wan`，下载/上传填实测速率的 90%
+          - 想换 MBIM（路由器侧拨号）：先在 AT 终端跑 `AT+QCFG="usbnet",2` 再 `AT+CFUN=1,1`
+          - 回退硬件加速：`uci set turboacc.config.fastpath='mediatek_hnat'` 并关掉 SQM
+
+          ### 附件
+
+          1. `$FWNAME` —— 固件本体
+          2. `$FWNAME.md5.txt` —— 它的 MD5
+          NOTES
+          gh release create "$TAG" out/* \
+            --title "OpenFi 6C $TAG" \
+            --notes-file /tmp/notes.md \
+            --repo "$GITHUB_REPOSITORY"
+          echo "✅ Release: $TAG"
+
+      # ── 摘要 ──────────────────────────────────────────────────────────
+      - name: 构建摘要
+        if: always()
+        run: |
+          {
+            echo "### OpenFi 6C —— ${{ steps.ver.outputs.tag }}"
+            echo ""
+            echo "| 缓存层 | 命中 |"
+            echo "|---|---|"
+            echo "| ① dl/ | ${{ steps.c_dl.outputs.cache-hit || '否' }} |"
+            echo "| ② feeds/ | ${{ steps.c_feeds.outputs.cache-hit || '否' }} |"
+            echo "| ③ 工具链+宿主 | ${{ steps.c_stage.outputs.cache-hit || '否' }} |"
+            echo "| ④ 内核+包编译目录 | 滚动缓存（每轮更新） |"
+            echo "| ⑤ ccache | ${{ steps.c_cc.outputs.cache-hit || '否' }} |"
+            echo ""
+            echo "编译耗时: ${{ steps.compile.outputs.duration || '—' }} 秒"
+          } >> "$GITHUB_STEP_SUMMARY"
