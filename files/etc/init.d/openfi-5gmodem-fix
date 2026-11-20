@@ -43,10 +43,39 @@ fix_firewall() {
 	uci -q commit firewall
 }
 
+# 4) LED：WAN 灯跟随当前数据设备（usb0/wwan0），WLAN 灯绑 ra0
+fix_leds() {
+	local dev l cur
+	for d in wwan0 usb0; do
+		[ -e "/sys/class/net/$d" ] && { dev="$d"; break; }
+	done
+	if [ -n "$dev" ]; then
+		for l in /sys/class/leds/*/; do
+			grep -q "\[netdev\]" "$l/trigger" 2>/dev/null || continue
+			cur=$(cat "$l/device_name" 2>/dev/null)
+			[ -e "/sys/class/net/$cur" ] && continue
+			echo "$dev" > "$l/device_name" 2>/dev/null \
+				&& logger -t openfi-net-fix "LED $(basename "$l") -> $dev"
+		done
+	fi
+	# WLAN 灯：绑到 ra0（2.4G AP）
+	if [ -e /sys/class/net/ra0 ] && [ -d /sys/class/leds/green:wlan ]; then
+		cur=$(cat /sys/class/leds/green:wlan/device_name 2>/dev/null)
+		if [ "$cur" != "ra0" ]; then
+			echo none > /sys/class/leds/green:wlan/trigger 2>/dev/null
+			echo netdev > /sys/class/leds/green:wlan/trigger 2>/dev/null
+			echo ra0 > /sys/class/leds/green:wlan/device_name 2>/dev/null
+			# netdev 默认 link+tx+rx 都亮，不需要额外写 trigger
+			logger -t openfi-net-fix "LED green:wlan -> ra0"
+		fi
+	fi
+}
+
 boot() {
 	fix_mkiface
 	fix_device_paths
 	fix_firewall
+	fix_leds
 	# 兜底：app 没认领时，按当前设备把对应接口拉起来
 	# （wan/wan6/wwan 都设了 auto=0，避免和 app 的接口抢同一个设备）
 	if [ -e /sys/class/net/usb0 ]; then

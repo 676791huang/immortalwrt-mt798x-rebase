@@ -13,7 +13,11 @@
 [ -x /usr/share/5gmodem/modemswitch.sh ] || exit 0
 
 uci -q get 5gmodem.@5gmodem[0] >/dev/null || uci -q set 5gmodem.@5gmodem[0]=5gmodem
-uci -q set 5gmodem.@5gmodem[0].signal_leds='0'
+# green:mobile 交给 5gmodem 的信号灯驱动（按 RSRP 亮/灭）
+uci -q set 5gmodem.@5gmodem[0].signal_leds='1'
+uci -q set 5gmodem.@5gmodem[0].signal_leds_names='green:mobile'
+uci -q set 5gmodem.@5gmodem[0].signal_leds_style='bars'
+uci -q set 5gmodem.@5gmodem[0].signal_leds_metric='rsrp'
 uci -q set 5gmodem.@5gmodem[0].auto_port='1'
 uci -q commit 5gmodem 2>/dev/null
 
