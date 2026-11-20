@@ -405,6 +405,18 @@ jobs:
           ls dl/mt79xx_* >/dev/null 2>&1 || echo "::warning::dl/ 里没看到 mt79xx_* 固件包"
           [ "$miss" -eq 0 ] || { echo "::error::源码没下全，先修下载再继续"; exit 1; }
 
+      # ── 只刷 host 工具 / 工具链 / 内核的 stamp 时间戳 ────────────────
+      # 包目录一律不碰：包用源码 md5 判定，刷了反而会漏编。
+      - name: 对齐缓存时间戳
+        if: steps.cache.outputs.ran == '1'
+        run: |
+          set -euo pipefail
+          find build_dir/host toolchain -type f -name '.*' -exec touch {} + 2>/dev/null || true
+          for d in build_dir/target-*/linux-*; do
+            [ -d "$d" ] && find "$d" -maxdepth 1 -type f -name '.*' -exec touch {} + 2>/dev/null || true
+          done
+          echo "已刷新 host 工具 / 工具链 / 内核的 stamp"
+
       - name: 编译前诊断
         run: |
           echo "== 缓存复用情况 =="
