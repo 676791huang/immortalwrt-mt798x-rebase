@@ -405,19 +405,17 @@ jobs:
           ls dl/mt79xx_* >/dev/null 2>&1 || echo "::warning::dl/ 里没看到 mt79xx_* 固件包"
           [ "$miss" -eq 0 ] || { echo "::error::源码没下全，先修下载再继续"; exit 1; }
 
-      # ── 只刷 host 工具 / 工具链 / 内核的 stamp 时间戳 ────────────────
-      # 包目录一律不碰：包用源码 md5 判定，刷了反而会漏编。
-      - name: 对齐缓存时间戳
+      # ── 源码 mtime 统一改老，避免 make 的 mtime 判定误认为要重编 ──────
+      # 只改源码，不动缓存产物（build_dir / staging_dir / toolchain / dl / feeds）
+      - name: 源码时间戳改老
         if: steps.cache.outputs.ran == '1'
         run: |
           set -euo pipefail
-          # make world 开始时还会重写一次 .config，普通 touch 会被它反超；
-          # 所以打到未来时间，确保工具链/内核的 stamp 永远比源码和 .config 新。
-          find build_dir/host toolchain -type f -name '.*' -exec touch -d '+1 day' {} + 2>/dev/null || true
-          for d in build_dir/target-*/linux-*; do
-            [ -d "$d" ] && find "$d" -maxdepth 1 -type f -name '.*' -exec touch -d '+1 day' {} + 2>/dev/null || true
-          done
-          echo "已把 host 工具 / 工具链 / 内核的 stamp 打到未来（避免被 .config 重写反超）"
+          find . \( -path ./.git -o -path ./build_dir -o -path ./staging_dir \
+                  -o -path ./toolchain -o -path ./dl -o -path ./feeds \
+                  -o -path ./bin -o -path ./tmp \) -prune -o -type f -print0 \
+            | xargs -0 touch -d '2000-01-01' 2>/dev/null || true
+          echo "源码 mtime 已改老（.config: $(stat -c %y .config 2>/dev/null | cut -c1-19)）"
 
       - name: 编译前诊断
         run: |
