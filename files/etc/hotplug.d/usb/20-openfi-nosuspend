@@ -1,0 +1,5 @@
+#!/bin/sh
+# 新插入的 USB 设备也立刻关掉自动挂起
+[ "$ACTION" = add ] || exit 0
+echo on > "/sys${DEVPATH}/power/control" 2>/dev/null
+exit 0

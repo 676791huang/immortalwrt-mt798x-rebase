@@ -1,0 +1,8 @@
+#!/bin/sh
+# ImmortalWrt 默认把 dnsmasq 缓存 TTL 抬到 1 小时，并允许使用过期记录
+# （min_cache_ttl=3600 / use_stale_cache=3600）。CDN 换 IP 后会出现
+# "DNS 正常、ping 通、网页打不开"。这里恢复上游标准行为。
+uci -q delete dhcp.@dnsmasq[0].min_cache_ttl
+uci -q delete dhcp.@dnsmasq[0].use_stale_cache
+uci -q commit dhcp 2>/dev/null
+exit 0

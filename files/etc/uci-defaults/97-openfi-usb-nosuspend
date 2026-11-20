@@ -6,3 +6,6 @@ for d in /sys/bus/usb/devices/*/power/control; do
 	[ -e "$d" ] && echo on > "$d" 2>/dev/null
 done
 exit 0
+
+# uci-defaults 只跑一次，而 autosuspend 重启会复位 —— 交给常驻服务每次开机执行
+[ -x /etc/init.d/openfi-usb-nosuspend ] && /etc/init.d/openfi-usb-nosuspend enable

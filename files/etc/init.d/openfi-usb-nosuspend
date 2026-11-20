@@ -1,0 +1,22 @@
+#!/bin/sh /etc/rc.common
+# 关闭 USB 自动挂起，避免 5G 模组空闲后被挂起（会导致长连接卡死）。
+# 注意：autosuspend 是内核模块参数，重启会复位成默认 2 秒，
+# 所以必须做成常驻服务，不能只放在 uci-defaults 里跑一次。
+START=99
+
+set_all_off() {
+	echo -1 > /sys/module/usbcore/parameters/autosuspend 2>/dev/null
+	for f in /sys/bus/usb/devices/*/power/control; do
+		[ -e "$f" ] && echo on > "$f" 2>/dev/null
+	done
+}
+
+boot() {
+	# 模组枚举要几秒，重试几次确保覆盖到新出现的设备
+	for i in 1 2 3 4 5; do
+		set_all_off
+		sleep 2
+	done
+}
+
+start() { boot; }
