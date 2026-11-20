@@ -160,11 +160,22 @@ jobs:
                       -type f -print0 | sort -z | xargs -0 sha256sum; } \
                   | sha256sum | cut -c1-16 )
 
+          # 整代指纹：工具链 + 内核 + 配置 + feed 列表 + 板级补丁，任何一项变了就换一代缓存
+          gen=$( { sha256sum include/kernel-version.mk toolchain/gcc/Config.version rules.mk \
+                        target/linux/mediatek/Makefile \
+                        target/linux/mediatek/filogic/config-6.12 \
+                        target/linux/generic/config-6.12 \
+                        defconfig/openfi6c.config feeds.conf.default; \
+                   find target/linux/mediatek/files-6.12 target/linux/mediatek/patches-6.12 \
+                     -type f -print0 | sort -z | xargs -0 sha256sum; } \
+                 | sha256sum | cut -c1-16 )
+
           {
             echo "week=$week"
             echo "toolchain=$tc"
             echo "config=$cfg"
             echo "kernel=$kern"
+            echo "gen=$gen"
           } >> "$GITHUB_OUTPUT"
 
           echo "工具链指纹: $tc"
@@ -243,46 +254,31 @@ jobs:
           mkdir -p build_dir/target-aarch64_cortex-a53_musl
 
       # ── ① dl/ 源码包 ─────────────────────────────────────────────────
-      # ── ①' dl/ 走 R2（1.5 GB，比 actions/cache 稳）────────────────────
-      - name: ① 恢复 dl/（R2）
-        id: r2dl
+
+      # ── 整代缓存（R2）：一次编译产出的所有层放同一个指纹目录 ───────────
+      - name: 恢复缓存（R2 整代）
+        id: cache
         if: env.R2_KEY_ID != '' && (github.event_name != 'workflow_dispatch' || github.event.inputs.clean_build != 'true')
         continue-on-error: true
         run: |
           set -euo pipefail
           rclone config create r2 s3 provider=Cloudflare access_key_id="$R2_KEY_ID" \
             secret_access_key="$R2_SECRET" endpoint="$R2_ENDPOINT" --non-interactive >/dev/null
-          KEY="ofc25/dl-${{ hashFiles('feeds.conf.default') }}-${{ steps.fp.outputs.week }}.tar.zst"
-          if timeout 900 rclone copyto "r2:${R2_BUCKET}/${KEY}" /tmp/dl.tar.zst --transfers 8 2>/dev/null; then
-            echo "hit=true" >> "$GITHUB_OUTPUT"
-            echo "R2 命中 dl: ${KEY}（$(du -h /tmp/dl.tar.zst | cut -f1)）"
-            time tar -I zstd -xf /tmp/dl.tar.zst -C .
-          else
-            echo "hit=false" >> "$GITHUB_OUTPUT"
-            echo "R2 未命中 dl: ${KEY}"
-          fi
-          rm -f /tmp/dl.tar.zst
-
-      - name: ① 恢复 dl/（源码包）
-        id: c_dl
-        if: (env.R2_KEY_ID == '' || steps.r2dl.outputs.hit != 'true') && (github.event_name != 'workflow_dispatch' || github.event.inputs.clean_build != 'true')
-        uses: actions/cache/restore@v4
-        with:
-          path: dl
-          key: ${{ env.CACHE_NAMESPACE }}-dl-${{ hashFiles('feeds.conf.default') }}-${{ steps.fp.outputs.week }}
-          restore-keys: |
-            ${{ env.CACHE_NAMESPACE }}-dl-
-
-      # ── ② feeds/（5 个 git 仓库）──────────────────────────────────────
-      - name: ② 恢复 feeds/
-        id: c_feeds
-        if: github.event_name != 'workflow_dispatch' || github.event.inputs.clean_build != 'true'
-        uses: actions/cache/restore@v4
-        with:
-          path: feeds
-          key: ${{ env.CACHE_NAMESPACE }}-feeds-${{ hashFiles('feeds.conf.default') }}-${{ steps.fp.outputs.week }}
-          restore-keys: |
-            ${{ env.CACHE_NAMESPACE }}-feeds-
+          base="ofc25/${{ steps.fp.outputs.gen }}"
+          miss=""
+          for item in dl feeds tool target ccache; do
+            if timeout 900 rclone copyto "r2:${R2_BUCKET}/${base}/${item}.tar.zst" "/tmp/${item}.tar.zst" --transfers 8 2>/dev/null; then
+              echo "✅ 命中 ${item}（$(du -h /tmp/${item}.tar.zst | cut -f1)）"
+              time tar -I zstd -xf "/tmp/${item}.tar.zst" -C .
+              rm -f "/tmp/${item}.tar.zst"
+            else
+              echo "❌ 未命中 ${item}"
+              miss="${miss} ${item}"
+            fi
+          done
+          echo "ran=1" >> "$GITHUB_OUTPUT"
+          echo "miss=${miss}" >> "$GITHUB_OUTPUT"
+          echo "整代缓存: ${base} 未命中:${miss}"
 
       - name: 更新并安装 feeds
         run: |
@@ -331,55 +327,7 @@ jobs:
           echo "✅ feed 包自检通过"
 
       # ── ③ 工具链 + 宿主工具 ───────────────────────────────────────────
-      - name: ③ 恢复工具链 + 宿主工具（省 ~40 分钟）
-        id: c_stage
-        if: github.event_name != 'workflow_dispatch' || github.event.inputs.clean_build != 'true'
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            staging_dir
-            toolchain
-            build_dir/host
-          key: ${{ env.CACHE_NAMESPACE }}-stage-${{ runner.arch }}-${{ steps.fp.outputs.toolchain }}
-          restore-keys: |
-            ${{ env.CACHE_NAMESPACE }}-stage-${{ runner.arch }}-
 
-      # ── ④' R2 版：编译目录（3GB 的那个大头）────────────────────────────
-      - name: ④ 恢复内核/包编译目录（R2）
-        id: r2td
-        if: env.R2_KEY_ID != '' && (github.event_name != 'workflow_dispatch' || github.event.inputs.clean_build != 'true')
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          rclone config create r2 s3 provider=Cloudflare access_key_id="$R2_KEY_ID" \
-            secret_access_key="$R2_SECRET" endpoint="$R2_ENDPOINT" --non-interactive >/dev/null
-          KEY="ofc25/td-${{ runner.arch }}-${{ steps.fp.outputs.toolchain }}-${{ steps.fp.outputs.kernel }}.tar.zst"
-          if timeout 600 rclone copyto "r2:${R2_BUCKET}/${KEY}" /tmp/td.tar.zst --transfers 8 2>/dev/null; then
-            echo "hit=true" >> "$GITHUB_OUTPUT"
-            echo "R2 命中: ${KEY}（$(du -h /tmp/td.tar.zst | cut -f1)）"
-            time tar -I zstd -xf /tmp/td.tar.zst -C .
-          else
-            echo "hit=false" >> "$GITHUB_OUTPUT"
-            echo "R2 未命中: ${KEY}（第一轮或指纹变了）"
-          fi
-          rm -f /tmp/td.tar.zst
-
-      # ── ④ 内核 + 包编译目录（增量构建的关键）───────────────────────────
-      - name: ④ 恢复内核/包编译目录（省 ~30-40 分钟）
-        id: c_td
-        if: (env.R2_KEY_ID == '' || steps.r2td.outputs.hit != 'true') && (github.event_name != 'workflow_dispatch' || github.event.inputs.clean_build != 'true')
-        uses: actions/cache/restore@v4
-        with:
-          path: build_dir/target-*
-          # key 带 run_id → 永远"精确命中不了"，但 restore-keys 会拿上一轮存的那份，
-          # 编完再把新状态存一份（滚动更新），下一轮拿到的就是最新的编译状态。
-          # restore-keys 里【固定住内核指纹】：内核相关文件一变就绝不回退到旧内核目录，
-          # 这一轮老老实实干净构建（慢，但不会把旧内核编进固件）。
-          key: ${{ env.CACHE_NAMESPACE }}-td-${{ runner.arch }}-${{ steps.fp.outputs.toolchain }}-${{ steps.fp.outputs.kernel }}-${{ steps.fp.outputs.config }}-${{ github.run_id }}
-          restore-keys: |
-            ${{ env.CACHE_NAMESPACE }}-td-${{ runner.arch }}-${{ steps.fp.outputs.toolchain }}-${{ steps.fp.outputs.kernel }}-
-
-      # ── ⑤ ccache ─────────────────────────────────────────────────────
       - name: ccache 环境
         run: |
           {
@@ -393,16 +341,6 @@ jobs:
             echo "CCACHE_MAXSIZE=1G"
           } >> "$GITHUB_ENV"
           mkdir -p .ccache
-
-      - name: ⑤ 恢复 ccache
-        id: c_cc
-        if: github.event_name != 'workflow_dispatch' || github.event.inputs.clean_build != 'true'
-        uses: actions/cache/restore@v4
-        with:
-          path: .ccache
-          key: ${{ env.CACHE_NAMESPACE }}-cc-${{ steps.fp.outputs.config }}-${{ steps.fp.outputs.week }}
-          restore-keys: |
-            ${{ env.CACHE_NAMESPACE }}-cc-
 
       # ── 配置 ──────────────────────────────────────────────────────────
       - name: 应用配置
@@ -501,75 +439,39 @@ jobs:
       # 条件统一是：不是被取消 && 精确 key 没命中。
       # 精确命中说明这份内容已经存过，再存会报 "cache already exists"。
 
-      - name: ① 保存 dl/
-        if: env.R2_KEY_ID == '' && (success() || failure()) && steps.c_dl.outputs.cache-hit != 'true'
-        continue-on-error: true
-        uses: actions/cache/save@v4
-        with:
-          path: dl
-          key: ${{ env.CACHE_NAMESPACE }}-dl-${{ hashFiles('feeds.conf.default') }}-${{ steps.fp.outputs.week }}
-
-      - name: ② 保存 feeds/
-        if: (success() || failure()) && steps.c_feeds.outputs.cache-hit != 'true'
-        continue-on-error: true
-        uses: actions/cache/save@v4
-        with:
-          path: feeds
-          key: ${{ env.CACHE_NAMESPACE }}-feeds-${{ hashFiles('feeds.conf.default') }}-${{ steps.fp.outputs.week }}
-
-      - name: ③ 保存工具链 + 宿主工具
-        if: (success() || failure()) && steps.c_stage.outputs.cache-hit != 'true'
-        continue-on-error: true
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            staging_dir
-            toolchain
-            build_dir/host
-          key: ${{ env.CACHE_NAMESPACE }}-stage-${{ runner.arch }}-${{ steps.fp.outputs.toolchain }}
-
       # ④ 每轮都存（key 带 run_id，永远不会"已存在"）。
       # 这是滚动缓存：下一轮 restore-keys 会拿到这一轮最新的编译状态。
-      - name: ④ 保存内核/包编译目录
-        if: env.R2_KEY_ID == '' && (success() || failure())
-        continue-on-error: true
-        uses: actions/cache/save@v4
-        with:
-          path: build_dir/target-*
-          key: ${{ env.CACHE_NAMESPACE }}-td-${{ runner.arch }}-${{ steps.fp.outputs.toolchain }}-${{ steps.fp.outputs.kernel }}-${{ steps.fp.outputs.config }}-${{ github.run_id }}
 
-      # ── ①' R2 保存 dl/ ──────────────────────────────────────────────
-      - name: ① 保存 dl/（R2）
+      # ── 整代缓存保存（R2）────────────────────────────────────────────
+      - name: 保存缓存（R2 整代）
         if: env.R2_KEY_ID != '' && (success() || failure())
         continue-on-error: true
         run: |
           set -euo pipefail
           rclone config create r2 s3 provider=Cloudflare access_key_id="$R2_KEY_ID" \
             secret_access_key="$R2_SECRET" endpoint="$R2_ENDPOINT" --non-interactive >/dev/null
-          KEY="ofc25/dl-${{ hashFiles('feeds.conf.default') }}-${{ steps.fp.outputs.week }}.tar.zst"
-          time tar -I 'zstd -T0' -cf /tmp/dl.tar.zst dl
-          ls -lh /tmp/dl.tar.zst
-          rclone copyto /tmp/dl.tar.zst "r2:${R2_BUCKET}/${KEY}" --transfers 8
-          echo "已上传 dl: ${KEY}"
-          rm -f /tmp/dl.tar.zst
+          base="ofc25/${{ steps.fp.outputs.gen }}"
+          miss="${{ steps.cache.outputs.miss }}"
+          # 恢复步骤没跑（clean_build 或首次）→ 所有层都存
+          if [ "${{ steps.cache.outputs.ran }}" != "1" ]; then
+            miss="dl feeds tool target ccache"
+          fi
+          pack() {
+            name="$1"; shift
+            time tar -I 'zstd -T0' -cf "/tmp/${name}.tar.zst" "$@" 2>/dev/null \
+              || { echo "⚠️ 打包 ${name} 失败"; rm -f "/tmp/${name}.tar.zst"; return 0; }
+            rclone copyto "/tmp/${name}.tar.zst" "r2:${R2_BUCKET}/${base}/${name}.tar.zst" --transfers 8 \
+              && echo "✅ 上传 ${name}（$(du -h /tmp/${name}.tar.zst | cut -f1)）"
+            rm -f "/tmp/${name}.tar.zst"
+          }
+          case "${miss}" in *dl*)      pack dl dl ;; esac
+          case "${miss}" in *feeds*)   pack feeds feeds ;; esac
+          case "${miss}" in *tool*)    pack tool toolchain staging_dir build_dir/host ;; esac
+          pack target build_dir/target-*
+          pack ccache .ccache
 
-      # ── ④' R2 保存 ───────────────────────────────────────────────────
-      - name: ④ 保存内核/包编译目录（R2）
-        if: env.R2_KEY_ID != '' && (success() || failure())
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          rclone config create r2 s3 provider=Cloudflare access_key_id="$R2_KEY_ID" \
-            secret_access_key="$R2_SECRET" endpoint="$R2_ENDPOINT" --non-interactive >/dev/null
-          KEY="ofc25/td-${{ runner.arch }}-${{ steps.fp.outputs.toolchain }}-${{ steps.fp.outputs.kernel }}.tar.zst"
-          time tar -I 'zstd -T0' -cf /tmp/td.tar.zst build_dir/target-*
-          ls -lh /tmp/td.tar.zst
-          rclone copyto /tmp/td.tar.zst "r2:${R2_BUCKET}/${KEY}" --transfers 8
-          echo "已上传: ${KEY}"
-          rm -f /tmp/td.tar.zst
-
-      # ── R2 保留策略：最多 2 个版本（上上个 + 上一个）──────────────
-      - name: R2 清理：只保留最新 2 个版本
+      # ── R2 清理：只保留最新 2 代 ────────────────────────────────────
+      - name: R2 清理（保留最新 2 代）
         if: env.R2_KEY_ID != '' && (success() || failure())
         continue-on-error: true
         run: |
@@ -584,35 +486,26 @@ jobs:
               files = json.load(open('/tmp/r2.json'))
           except Exception:
               files = []
-          groups = defaultdict(list)
+          gens = defaultdict(list)
           for f in files:
               p = f.get('Path') or ''
-              if not p:
+              parts = p.split('/')
+              if len(parts) < 2:
                   continue
-              kind = p.split('/')[-1].split('-')[0]
-              groups[kind].append(f)
-          for kind, fs in groups.items():
-              fs.sort(key=lambda x: x.get('ModTime', ''), reverse=True)
-              for f in fs[2:]:
+              gens[parts[0]].append(f)
+          order = sorted(gens.items(), key=lambda kv: max(x.get('ModTime','') for x in kv[1]), reverse=True)
+          for gen, fs in order[2:]:
+              for f in fs:
                   print(f['Path'])
           " > /tmp/r2-old.txt
           if [ -s /tmp/r2-old.txt ]; then
             while IFS= read -r p; do
-              rclone deletefile "r2:${R2_BUCKET}/ofc25/$p" && echo "删除旧版本: $p"
+              rclone deletefile "r2:${R2_BUCKET}/ofc25/$p" && echo "删除旧代: $p"
             done < /tmp/r2-old.txt
           else
-            echo "没有超过 2 个的旧版本，跳过清理"
+            echo "只有 2 代以内，无需清理"
           fi
 
-      - name: ⑤ 保存 ccache
-        if: (success() || failure()) && steps.c_cc.outputs.cache-hit != 'true'
-        continue-on-error: true
-        uses: actions/cache/save@v4
-        with:
-          path: .ccache
-          key: ${{ env.CACHE_NAMESPACE }}-cc-${{ steps.fp.outputs.config }}-${{ steps.fp.outputs.week }}
-
-      # ── 产物 ──────────────────────────────────────────────────────────
       - name: 收集产物 + 生成 MD5
         if: success()
         run: |
