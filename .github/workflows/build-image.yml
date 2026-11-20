@@ -1,0 +1,36 @@
+name: build-image
+
+# 预烤编译环境镜像 → ghcr.io/<owner>/immortalwrt-build:latest
+# 只有改了 .github/docker/** 或本文件才会重建。
+
+on:
+  push:
+    paths:
+      - '.github/docker/**'
+      - '.github/workflows/build-image.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 登录 ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建并推送
+        uses: docker/build-push-action@v6
+        with:
+          context: .github/docker
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/immortalwrt-build:latest
