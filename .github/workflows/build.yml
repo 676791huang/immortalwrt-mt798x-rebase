@@ -243,9 +243,29 @@ jobs:
           mkdir -p build_dir/target-aarch64_cortex-a53_musl
 
       # ── ① dl/ 源码包 ─────────────────────────────────────────────────
+      # ── ①' dl/ 走 R2（1.5 GB，比 actions/cache 稳）────────────────────
+      - name: ① 恢复 dl/（R2）
+        id: r2dl
+        if: env.R2_KEY_ID != '' && (github.event_name != 'workflow_dispatch' || github.event.inputs.clean_build != 'true')
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          rclone config create r2 s3 provider=Cloudflare access_key_id="$R2_KEY_ID" \
+            secret_access_key="$R2_SECRET" endpoint="$R2_ENDPOINT" --non-interactive >/dev/null
+          KEY="ofc25/dl-${{ hashFiles('feeds.conf.default') }}-${{ steps.fp.outputs.week }}.tar.zst"
+          if timeout 900 rclone copyto "r2:${R2_BUCKET}/${KEY}" /tmp/dl.tar.zst --transfers 8 2>/dev/null; then
+            echo "hit=true" >> "$GITHUB_OUTPUT"
+            echo "R2 命中 dl: ${KEY}（$(du -h /tmp/dl.tar.zst | cut -f1)）"
+            time tar -I zstd -xf /tmp/dl.tar.zst -C .
+          else
+            echo "hit=false" >> "$GITHUB_OUTPUT"
+            echo "R2 未命中 dl: ${KEY}"
+          fi
+          rm -f /tmp/dl.tar.zst
+
       - name: ① 恢复 dl/（源码包）
         id: c_dl
-        if: github.event_name != 'workflow_dispatch' || github.event.inputs.clean_build != 'true'
+        if: (env.R2_KEY_ID == '' || steps.r2dl.outputs.hit != 'true') && (github.event_name != 'workflow_dispatch' || github.event.inputs.clean_build != 'true')
         uses: actions/cache/restore@v4
         with:
           path: dl
@@ -426,12 +446,22 @@ jobs:
           timeout 1800 make download -j"$(nproc)" \
             || { echo "并行下载超时,改成串行再试一次"; timeout 1800 make download -j1 V=s; }
 
+      - name: 编译前诊断
+        run: |
+          echo "== 缓存复用情况 =="
+          echo "build_dir/target 下已完成的包(.built): $(find build_dir/target-* -name '.built' 2>/dev/null | wc -l)"
+          echo "build_dir/target 大小: $(du -sh build_dir/target-* 2>/dev/null | cut -f1 | tr '\n' ' ')"
+          echo ".config 哈希: $(sha256sum .config 2>/dev/null | cut -c1-16)"
+          echo "toolchain 大小: $(du -sh toolchain 2>/dev/null | cut -f1)"
+          echo "staging_dir 大小: $(du -sh staging_dir 2>/dev/null | cut -f1)"
+          echo "已编译内核镜像:"; ls -la build_dir/target-*/linux-*/vmlinux* 2>/dev/null | head -3 || true
+
       - name: 编译
         id: compile
         run: |
           set -o pipefail
           START=$(date +%s)
-          time timeout 10800 make -j"$(($(nproc) + 1))" 2>&1 | tee /tmp/build.log
+          time timeout 5400 make -j"$(($(nproc) + 1))" 2>&1 | tee /tmp/build.log
           END=$(date +%s)
           echo "编译耗时: $(( (END-START)/60 )) 分 $(( (END-START)%60 )) 秒"
           echo "duration=$((END-START))" >> "$GITHUB_OUTPUT"
@@ -472,7 +502,7 @@ jobs:
       # 精确命中说明这份内容已经存过，再存会报 "cache already exists"。
 
       - name: ① 保存 dl/
-        if: (success() || failure()) && steps.c_dl.outputs.cache-hit != 'true'
+        if: env.R2_KEY_ID == '' && (success() || failure()) && steps.c_dl.outputs.cache-hit != 'true'
         continue-on-error: true
         uses: actions/cache/save@v4
         with:
@@ -508,6 +538,21 @@ jobs:
           path: build_dir/target-*
           key: ${{ env.CACHE_NAMESPACE }}-td-${{ runner.arch }}-${{ steps.fp.outputs.toolchain }}-${{ steps.fp.outputs.kernel }}-${{ steps.fp.outputs.config }}-${{ github.run_id }}
 
+      # ── ①' R2 保存 dl/ ──────────────────────────────────────────────
+      - name: ① 保存 dl/（R2）
+        if: env.R2_KEY_ID != '' && (success() || failure())
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          rclone config create r2 s3 provider=Cloudflare access_key_id="$R2_KEY_ID" \
+            secret_access_key="$R2_SECRET" endpoint="$R2_ENDPOINT" --non-interactive >/dev/null
+          KEY="ofc25/dl-${{ hashFiles('feeds.conf.default') }}-${{ steps.fp.outputs.week }}.tar.zst"
+          time tar -I 'zstd -T0' -cf /tmp/dl.tar.zst dl
+          ls -lh /tmp/dl.tar.zst
+          rclone copyto /tmp/dl.tar.zst "r2:${R2_BUCKET}/${KEY}" --transfers 8
+          echo "已上传 dl: ${KEY}"
+          rm -f /tmp/dl.tar.zst
+
       # ── ④' R2 保存 ───────────────────────────────────────────────────
       - name: ④ 保存内核/包编译目录（R2）
         if: env.R2_KEY_ID != '' && (success() || failure())
@@ -517,7 +562,7 @@ jobs:
           rclone config create r2 s3 provider=Cloudflare access_key_id="$R2_KEY_ID" \
             secret_access_key="$R2_SECRET" endpoint="$R2_ENDPOINT" --non-interactive >/dev/null
           KEY="ofc25/td-${{ runner.arch }}-${{ steps.fp.outputs.toolchain }}-${{ steps.fp.outputs.kernel }}.tar.zst"
-          time tar -I zstd -cf /tmp/td.tar.zst build_dir/target-*
+          time tar -I 'zstd -T0' -cf /tmp/td.tar.zst build_dir/target-*
           ls -lh /tmp/td.tar.zst
           rclone copyto /tmp/td.tar.zst "r2:${R2_BUCKET}/${KEY}" --transfers 8
           echo "已上传: ${KEY}"
@@ -534,14 +579,22 @@ jobs:
           rclone lsjson "r2:${R2_BUCKET}/ofc25" --files-only > /tmp/r2.json 2>/dev/null || echo '[]' > /tmp/r2.json
           python3 -c "
           import json
+          from collections import defaultdict
           try:
               files = json.load(open('/tmp/r2.json'))
           except Exception:
               files = []
-          files = [f for f in files if f.get('Path')]
-          files.sort(key=lambda f: f.get('ModTime', ''), reverse=True)
-          for f in files[2:]:
-              print(f['Path'])
+          groups = defaultdict(list)
+          for f in files:
+              p = f.get('Path') or ''
+              if not p:
+                  continue
+              kind = p.split('/')[-1].split('-')[0]
+              groups[kind].append(f)
+          for kind, fs in groups.items():
+              fs.sort(key=lambda x: x.get('ModTime', ''), reverse=True)
+              for f in fs[2:]:
+                  print(f['Path'])
           " > /tmp/r2-old.txt
           if [ -s /tmp/r2-old.txt ]; then
             while IFS= read -r p; do
