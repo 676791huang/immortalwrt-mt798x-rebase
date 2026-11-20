@@ -1,6 +1,26 @@
-config queue 'wan'
+# 两条 WAN 各一份整形配置（出厂都关闭）：
+#   ncm  -> usb0    (5G 模组 NCM 模式)
+#   mbim -> wwan0   (5G 模组 MBIM 模式)
+# 用哪条就启用哪条，切模式不用改配置。
+config queue 'ncm'
 	option enabled '0'
-	option interface 'wan'
+	option interface 'usb0'
+	option download '45000'
+	option upload '15000'
+	option debug_logging '0'
+	option verbosity '5'
+	option script 'piece_of_cake.qos'
+	option qdisc 'cake'
+	option linklayer 'ethernet'
+	option overhead '0'
+	option ingress '1'
+	option iqdisc 'cake'
+	option eqdisc_opts 'nat dual-srchost dual-dsthost'
+	option iqdisc_opts 'nat dual-dsthost dual-srchost'
+
+config queue 'mbim'
+	option enabled '0'
+	option interface 'wwan0'
 	option download '45000'
 	option upload '15000'
 	option debug_logging '0'

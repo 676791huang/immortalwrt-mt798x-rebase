@@ -1,9 +1,12 @@
 #!/bin/sh
-# 5gmodem 面板配置 + 双模式 WAN。
+# 5gmodem 面板配置 + 双模式 WAN（NCM / MBIM 各一套，同时存在）。
 #
-# 模组可能是 NCM（usb0）或 MBIM（cdc-wdm0）。两种接口都预先建好，
-# 哪个设备存在哪个就起来（另一个报 NO_DEVICE，无害）。
-# 这样切换模式不需要改任何配置，也不需要检测脚本。
+# 板级 02_network 只建 LAN；WAN 一律在这里生成：
+#   wan   dhcp   usb0       ← NCM（模组自拨，网卡 usb0）
+#   wan6  dhcpv6 usb0       ← NCM 的 IPv6
+#   wwan  mbim   cdc-wdm0   ← MBIM（路由器拨号，APN cmnet）
+# 哪个设备存在哪个就起来，另一个报 NO_DEVICE（无害）。
+# 切换模组模式不需要改任何配置。
 
 [ -x /usr/share/5gmodem/modemswitch.sh ] || exit 0
 
@@ -12,15 +15,20 @@ uci -q set 5gmodem.@5gmodem[0].signal_leds='0'
 uci -q set 5gmodem.@5gmodem[0].auto_port='1'
 uci -q commit 5gmodem 2>/dev/null
 
-# NCM：板级 02_network 已生成 wan(usb0/dhcp)，这里只兜底 + 设优先级
+# NCM 的 IPv4
 uci -q get network.wan >/dev/null || {
 	uci -q set network.wan=interface
 	uci -q set network.wan.proto='dhcp'
 	uci -q set network.wan.device='usb0'
 }
 uci -q set network.wan.metric='120'
+uci -q set network.wan6=interface
+uci -q set network.wan6.proto='dhcpv6'
+uci -q set network.wan6.device='usb0'
+uci -q set network.wan6.reqaddress='try'
+uci -q set network.wan6.reqprefix='auto'
 
-# MBIM：模组切到 MBIM 时自动顶上来
+# MBIM（IPv4+IPv6 由 mbim 协议在同一条接口上处理）
 uci -q get network.wwan >/dev/null || {
 	uci -q set network.wwan=interface
 	uci -q set network.wwan.proto='mbim'
@@ -31,10 +39,10 @@ uci -q set network.wwan.pdptype='ipv4v6'
 uci -q set network.wwan.metric='110'
 uci -q commit network
 
-# 防火墙 wan 区：存在的 WAN 接口都放进去（幂等，不删任何项）
+# 防火墙 wan 区：存在的 WAN 接口全部放进去（幂等，不删任何项）
 z=$(uci -q show firewall 2>/dev/null | sed -n "s/^firewall\.\([^.]*\)\.name='wan'$/\1/p" | head -1)
 if [ -n "$z" ]; then
-	for n in wan wwan wan6; do
+	for n in wan wan6 wwan; do
 		uci -q get "network.$n" >/dev/null 2>&1 || continue
 		uci -q get "firewall.$z.network" | tr ' ' '\n' | grep -qx "$n" \
 			|| uci -q add_list "firewall.$z.network=$n"

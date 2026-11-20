@@ -159,10 +159,12 @@ mediatek_setup_interfaces()
 		ucidef_set_interface_lan "eth0"
 		;;
 	openfi,6c)
-		# 实体口是 LAN(gmac1 = eth1),WAN 是 USB 模组的 RNDIS 网口 usb0。
-		# 【不能沿用 eth0】—— 那是 gmac0 那条 2500base-x 固定链路,
-		# 板上没有对应接口、也没有 PHY,把它当 LAN 会得到一块没有网络的板子。
-		ucidef_set_interfaces_lan_wan "eth1" "usb0"
+		# 实体口是 LAN(gmac1 = eth1)。【不能沿用 eth0】—— 那是 gmac0 的
+		# 2500base-x 固定链路,板上没有对应接口也没有 PHY。
+		#
+		# WAN 不在这里写死:5G 模组可能是 NCM(usb0) 或 MBIM(cdc-wdm0/wwan0),
+		# 两个接口由 /etc/uci-defaults/96-openfi-5gmodem 同时创建,哪个设备在哪个起来。
+		ucidef_set_interface_lan "eth1"
 		;;
 	viettel,32x6|\
 	wirelesstag,zx7981pd-ubootmod)
