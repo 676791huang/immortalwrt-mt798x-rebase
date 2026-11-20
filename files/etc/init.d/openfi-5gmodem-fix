@@ -2,23 +2,15 @@
 # 5G 配置小修（幂等，不做任何"删接口"的动作）。
 #  1. mkiface.sh 生成 device 时去掉 /dev/ 前缀（netifd 只认设备名）；
 #  2. 已写坏的 network.*.device 归一化；
-#  3. 防火墙 wan 区去重（保留原样，不增不减）。
-START=15
+#  3. 防火墙 wan 区去重（保留原样，不增不减）；
+#  4. 兜底 ifup：app 没认领时按当前设备拉起 wan/wan6/wwan（三者 auto=0）。
+START=99
 
 fix_mkiface() {
 	local f=/usr/share/5gmodem/mkiface.sh
 	if [ -f "$f" ] && grep -q 'IDEV="\$DEV"' "$f"; then
 		sed -i 's|IDEV="\$DEV"|IDEV="${DEV#/dev/}"|' "$f"
 		logger -t openfi-net-fix "mkiface.sh: device 改用设备名"
-	fi
-	# 让 app 认领我们静态建好的 WAN 接口（wan/wwan），不再另建 modem2。
-	# 依据：lib.sh 的 iface_owned_by() 只认 modem_imei/modem_mac，
-	# 我们的接口没有这些字段，app 就会绕开并新建接口，造成多个接口抢同一设备。
-	local l=/usr/share/5gmodem/lib.sh
-	if [ -f "$l" ] && ! grep -q "openfi-net-fix claim" "$l"; then
-		sed -i 's/^iface_owned_by() {$/iface_owned_by() {
-    case " wan wwan wan6 " in *" $1 "*) return 0 ;; esac # openfi-net-fix claim/' "$l"
-		logger -t openfi-net-fix "lib.sh: wan/wwan 视为 app 已认领"
 	fi
 }
 
@@ -55,4 +47,13 @@ boot() {
 	fix_mkiface
 	fix_device_paths
 	fix_firewall
+	# 兜底：app 没认领时，按当前设备把对应接口拉起来
+	# （wan/wan6/wwan 都设了 auto=0，避免和 app 的接口抢同一个设备）
+	if [ -e /sys/class/net/usb0 ]; then
+		ifstatus wan 2>/dev/null | grep -q '"up": true' || ifup wan 2>/dev/null
+		ifstatus wan6 2>/dev/null | grep -q '"up": true' || ifup wan6 2>/dev/null
+	fi
+	if [ -e /dev/cdc-wdm0 ]; then
+		ifstatus wwan 2>/dev/null | grep -q '"up": true' || ifup wwan 2>/dev/null
+	fi
 }
