@@ -1,6 +1,8 @@
-# 默认开 MediaTek HNAT 硬件加速（近线速转发）。
-# 注意：HNAT 会把已建立的流交给 PPE，CPU 上的 cake/IFB 看不到这些包，
-# 所以开了 HNAT 就不要开 SQM 整形；两者只能选一个。
+# HNAT 在这块板子（USB 5G WAN）上实测不可用：
+#   hook_toggle=enabled 时，路由器自己发出的 UDP（DNS 查询）
+#   会被 HNAT 的钩子丢弃 —— ping 通、DNS 全超时、网页打不开。
+# 所以默认关闭，转发交给内核软件路径（MT7981 双核 A53 对 5G 带宽够用）。
+# 想恢复硬件加速：把 fastpath 改成 mediatek_hnat，并自负风险。
 config turboacc 'config'
-	option fastpath 'mediatek_hnat'
+	option fastpath 'disabled'
 	option tcpcca 'bbr'
