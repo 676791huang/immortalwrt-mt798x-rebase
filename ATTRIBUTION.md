@@ -74,7 +74,7 @@ src-git 5gmodem https://github.com/fildunsky/luci-app-5gmodem.git;v4.0.9
 | `scripts/openfi/` | 一致性检查、LED 检查、musl 检查、同步到树 |
 | `files/etc/config/sqm`、`files/etc/config/turboacc` | 出场网络调优（CAKE 整形、关掉 turboacc 的 HNAT 快路） |
 | `files/etc/sysctl.d/99-openfi-net-tweaks.conf` | 延迟 / 缓冲区调优 |
-| `files/etc/uci-defaults/95-openfi-apk-mirror`、`96-openfi-5gmodem`、`97-openfi-usb-nosuspend` | 首启动默认项 |
+| `files/etc/uci-defaults/95-openfi-apk-mirror`、`97-openfi-usb-nosuspend` | 首启动默认项 |
 | `.github/workflows/build.yml` | 出固件的 CI（五层缓存） |
 | `.github/workflows/sync-upstream.yml` | 上游同步 CI（镜像快进 + 合并 + 两道闸门） |
 
