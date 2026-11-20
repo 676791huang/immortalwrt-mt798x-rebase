@@ -253,8 +253,6 @@ jobs:
           mkdir -p dl feeds toolchain staging_dir build_dir/host .ccache
           mkdir -p build_dir/target-aarch64_cortex-a53_musl
 
-      # ── ① dl/ 源码包 ─────────────────────────────────────────────────
-
       # ── 整代缓存（R2）：一次编译产出的所有层放同一个指纹目录 ───────────
       - name: 恢复缓存（R2 整代）
         id: cache
@@ -283,15 +281,9 @@ jobs:
       - name: 更新并安装 feeds
         run: |
           set -eu
-          # 命中本周缓存就跳过 update —— feeds 在这一周内固定在缓存时的版本，
-          # 每轮省掉 5 个 git fetch，也保证同一周的构建来自同一份 feed。
-          # 想拿最新 feed：等下周（key 带周号）或跑 clean_build。
-          if [ "${{ steps.c_feeds.outputs.cache-hit }}" = "true" ]; then
-            echo "feeds 缓存命中（本周内冻结），跳过 update"
-          else
-            timeout 600 ./scripts/feeds update -a \
-              || { echo "::error::feeds 更新超时(git 仓库拉不下来)"; exit 1; }
-          fi
+          # 整代缓存里已经有 feeds/，update 只是增量同步（几十秒）
+          timeout 600 ./scripts/feeds update -a \
+            || { echo "::error::feeds 更新超时(git 仓库拉不下来)"; exit 1; }
           timeout 600 ./scripts/feeds install -a \
             || { echo "::error::feeds 安装超时"; exit 1; }
           echo "包版本(当前提交): $(git rev-parse --short HEAD 2>/dev/null || echo '?')"
@@ -596,13 +588,8 @@ jobs:
           {
             echo "### OpenFi 6C —— ${{ steps.ver.outputs.tag }}"
             echo ""
-            echo "| 缓存层 | 命中 |"
-            echo "|---|---|"
-            echo "| ① dl/ | ${{ steps.c_dl.outputs.cache-hit || '否' }} |"
-            echo "| ② feeds/ | ${{ steps.c_feeds.outputs.cache-hit || '否' }} |"
-            echo "| ③ 工具链+宿主 | ${{ steps.c_stage.outputs.cache-hit || '否' }} |"
-            echo "| ④ 内核+包编译目录 | 滚动缓存（每轮更新） |"
-            echo "| ⑤ ccache | ${{ steps.c_cc.outputs.cache-hit || '否' }} |"
+            echo "| 缓存代（整代） | \`${{ steps.fp.outputs.gen }}\` |"
+            echo "| 未命中层 | ${{ steps.cache.outputs.miss || '无（整代命中）' }} |"
             echo ""
             echo "编译耗时: ${{ steps.compile.outputs.duration || '—' }} 秒"
           } >> "$GITHUB_STEP_SUMMARY"
